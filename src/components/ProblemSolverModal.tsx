@@ -15,11 +15,19 @@ import {
   Loader2,
   CheckCircle2,
   Info,
+  Flag,
+  Send,
+  AlertTriangle,
 } from 'lucide-react';
 import { ProblemSolution, ProblemSolutionStep } from '../types/features.ts';
 import { requestSolveProblem } from '../services/api.ts';
 import { calculateMolarMass, PERIODIC_ELEMENTS, ElementData } from '../utils/chemistryTools.ts';
 import { MarkdownView } from './MarkdownView.tsx';
+import { ReportModal } from './ReportModal.tsx';
+import { isTextReported } from '../services/storage.ts';
+import { shareToTelegram } from '../utils/shareUtils.ts';
+import { AiDisclaimerNotice } from './AiDisclaimerNotice.tsx';
+import { FriendlyErrorCard } from './FriendlyErrorCard.tsx';
 
 interface ProblemSolverModalProps {
   onClose: () => void;
@@ -39,9 +47,12 @@ export const ProblemSolverModal: React.FC<ProblemSolverModalProps> = ({
   const [activeStepIdx, setActiveStepIdx] = useState<number>(0);
   const [showAllSteps, setShowAllSteps] = useState<boolean>(false);
   const [understoodSteps, setUnderstoodSteps] = useState<Record<number, boolean>>({});
+  const [isReportingSolution, setIsReportingSolution] = useState<boolean>(false);
+  const [reportRefreshTrigger, setReportRefreshTrigger] = useState<number>(0);
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isCompressing, setIsCompressing] = useState<boolean>(false);
+  const [failureCount, setFailureCount] = useState<number>(0);
 
   // Chemistry Tool 1: Periodic Table State
   const [selectedElement, setSelectedElement] = useState<ElementData | null>(null);
@@ -64,7 +75,7 @@ export const ProblemSolverModal: React.FC<ProblemSolverModalProps> = ({
       setIsCompressing(true);
       setErrorMessage(null);
       try {
-        const compressed = await import('../utils/imageCompressor.ts').then(m => m.compressImageClient(file, 1280, 0.8));
+        const compressed = await import('../utils/imageCompressor.ts').then(m => m.compressImageClient(file, 1024, 0.7));
         setImage(compressed.dataUrl);
       } catch (compressErr) {
         setErrorMessage('Ҳангоми коркарди расм хатогӣ шуд.');
@@ -88,11 +99,18 @@ export const ProblemSolverModal: React.FC<ProblemSolverModalProps> = ({
       });
 
       setSolution(res);
+      setFailureCount(0);
       setActiveStepIdx(0);
       setShowAllSteps(false);
       setUnderstoodSteps({});
     } catch (err: any) {
-      setErrorMessage(err.message || 'Хатогӣ рух дод. Лутфан дубора кӯшиш кунед.');
+      const nextCount = failureCount + 1;
+      setFailureCount(nextCount);
+      if (nextCount >= 3) {
+        setErrorMessage('Пайвастшавӣ 3 маротиба бемуваффақият анҷом ёфт. Серверҳои Gemini муваққатан банданд ё интернет суст аст. Лутфан тугмаи «Дубора кӯшиш кунед»-ро пахш намоед.');
+      } else {
+        setErrorMessage(err.message || 'Хатогӣ рух дод. Лутфан дубора кӯшиш кунед.');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -304,16 +322,10 @@ export const ProblemSolverModal: React.FC<ProblemSolverModalProps> = ({
                   )}
 
                   {errorMessage && (
-                    <div className="p-3.5 rounded-2xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 text-xs space-y-2">
-                      <div>{errorMessage}</div>
-                      <button
-                        type="button"
-                        onClick={() => handleSolve()}
-                        className="px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs"
-                      >
-                        Дубора кӯшиш кунед
-                      </button>
-                    </div>
+                    <FriendlyErrorCard
+                      error={errorMessage}
+                      onRetry={() => handleSolve()}
+                    />
                   )}
 
                   {/* Submit button */}
@@ -475,6 +487,69 @@ export const ProblemSolverModal: React.FC<ProblemSolverModalProps> = ({
                       </details>
                     </div>
                   )}
+
+                  {/* Actions & Report Mistake */}
+                  {solution && (() => {
+                    const solutionSummary = `${solution.problemText || problemText}\n` +
+                      solution.steps.map((s) => `${s.stepNumber}. ${s.title}: ${s.content}`).join('\n');
+                    const isReported = isTextReported(solutionSummary);
+
+                    return (
+                      <div className="space-y-3 pt-2">
+                        {isReported && (
+                          <div className="p-3 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 text-xs text-amber-800 dark:text-amber-300 flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                              <span>Шумо дар ин ҳал хато қайд карда будед.</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleSolve()}
+                              className="px-2.5 py-1 rounded-xl bg-amber-500 hover:bg-amber-600 text-white font-bold text-[11px] shrink-0 transition-colors"
+                            >
+                              Дубора тавлид кун
+                            </button>
+                          </div>
+                        )}
+
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-100 dark:border-slate-800">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const text = `📐 Ҳалли масъала аз рӯи ${solution.subject}:\n\n` +
+                                `Масъала: «${solution.problemText || problemText}»\n\n` +
+                                solution.steps.map((s) => `Қадами ${s.stepNumber} (${s.title}): ${s.content}`).join('\n\n') +
+                                `\n\nҲалшуда дар «Илмисино» - Ёрдамчии ҳушманди ММТ`;
+                              shareToTelegram({
+                                title: `Ҳалли масъала: ${solution.subject}`,
+                                text,
+                              });
+                            }}
+                            className="px-3 py-1.5 rounded-xl bg-sky-50 dark:bg-sky-950/50 hover:bg-sky-100 text-sky-700 dark:text-sky-300 font-bold text-xs flex items-center gap-1.5 transition-colors border border-sky-200/60 dark:border-sky-800"
+                          >
+                            <Send className="w-3.5 h-3.5 text-sky-500" />
+                            <span>✈️ Ба Telegram фиристодан</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setIsReportingSolution(true)}
+                            className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-amber-50 dark:bg-slate-800 dark:hover:bg-amber-950/40 text-slate-600 hover:text-amber-600 dark:text-slate-300 dark:hover:text-amber-400 font-bold text-xs flex items-center gap-1.5 transition-colors"
+                          >
+                            <Flag className="w-3.5 h-3.5 text-amber-500" />
+                            <span>🚩 Хато ёфтам</span>
+                          </button>
+                        </div>
+
+                        {/* AI Disclaimer Notice with Speaker */}
+                        <AiDisclaimerNotice
+                          variant="full"
+                          speakableText={solutionSummary}
+                          onReport={() => setIsReportingSolution(true)}
+                        />
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>
@@ -686,6 +761,22 @@ export const ProblemSolverModal: React.FC<ProblemSolverModalProps> = ({
           )}
         </div>
       </div>
+
+      {/* Report Modal */}
+      {solution && (
+        <ReportModal
+          isOpen={isReportingSolution}
+          onClose={() => {
+            setIsReportingSolution(false);
+            setReportRefreshTrigger((p) => p + 1);
+          }}
+          subject={solution.subject || subject}
+          topicTitle="Ҳалли масъала"
+          exactText={`${solution.problemText || problemText}\n\nҲал: ` + solution.steps.map((s) => `${s.stepNumber}. ${s.title}: ${s.content}`).join('\n')}
+          source="problem"
+          onReportSaved={() => setReportRefreshTrigger((p) => p + 1)}
+        />
+      )}
     </div>
   );
 };

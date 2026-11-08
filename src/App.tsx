@@ -29,6 +29,7 @@ import { FlashcardsScreen } from './components/FlashcardsScreen.tsx';
 import { MmtExamScreen } from './components/MmtExamScreen.tsx';
 import { ProblemSolverModal } from './components/ProblemSolverModal.tsx';
 import { StudyPlanScreen } from './components/StudyPlanScreen.tsx';
+import { OnboardingModal, isOnboardingCompleted } from './components/OnboardingModal.tsx';
 
 export default function App() {
   const [settings, setSettings] = useState<AppSettings>(() => getStoredSettings());
@@ -39,6 +40,7 @@ export default function App() {
   const [currentTopic, setCurrentTopic] = useState<TopicRecord | null>(null);
 
   // Modal states
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState<boolean>(() => !isOnboardingCompleted());
   const [isAddModalOpen, setIsAddModalOpen] = useState<boolean>(false);
   const [addSubjectId, setAddSubjectId] = useState<SubjectId>('chemistry');
   const [addOption, setAddOption] = useState<string>('Синфи 9');
@@ -159,6 +161,8 @@ export default function App() {
                 onOpenProblemSolver={() => setIsProblemSolverOpen(true)}
                 recentTopics={topics}
                 onOpenTopic={handleOpenTopic}
+                dueCardsCount={dueCardsCount}
+                onOpenCards={() => setActiveTab('cards')}
               />
             )}
 
@@ -221,6 +225,7 @@ export default function App() {
                 settings={settings}
                 onUpdateSettings={updateSettings}
                 onClearAllData={handleClearAll}
+                onShowOnboarding={() => setIsOnboardingOpen(true)}
               />
             )}
           </>
@@ -235,6 +240,12 @@ export default function App() {
           dueCardsCount={dueCardsCount}
         />
       )}
+
+      {/* First-Launch Onboarding Modal */}
+      <OnboardingModal
+        isOpen={isOnboardingOpen}
+        onClose={() => setIsOnboardingOpen(false)}
+      />
 
       {/* Add Topic Modal / Screen */}
       {isAddModalOpen && (

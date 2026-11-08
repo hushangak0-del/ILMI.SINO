@@ -1,6 +1,8 @@
 import { AppSettings, SubjectId, TopicRecord, UserStats } from '../types/index.ts';
 import { calculateUserStats, SAMPLE_TOPICS } from '../utils/studyLogic.ts';
 
+import { ErrorReport } from '../types/reports.ts';
+
 const STORAGE_KEYS = {
   TOPICS: 'ilmisino_topics_v1',
   SETTINGS: 'ilmisino_settings_v1',
@@ -8,6 +10,7 @@ const STORAGE_KEYS = {
   FLASHCARDS: 'ilmisino_flashcards_v1',
   EXAMS: 'ilmisino_exams_v1',
   STUDY_PLAN: 'ilmisino_study_plan_v1',
+  REPORTS: 'ilmisino_reports_v1',
 };
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -299,3 +302,61 @@ function seedInitialTopics(): TopicRecord[] {
     },
   ];
 }
+
+export function getStoredReports(): ErrorReport[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.REPORTS);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (e) {
+    console.error('Failed to load reports:', e);
+  }
+  return [];
+}
+
+export function saveReport(report: ErrorReport): ErrorReport[] {
+  const all = getStoredReports();
+  const updated = [report, ...all];
+  saveAllReports(updated);
+  return updated;
+}
+
+export function saveAllReports(reports: ErrorReport[]): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(reports));
+  } catch (e) {
+    console.error('Failed to save reports:', e);
+  }
+}
+
+export function updateReportStatus(id: string, status: 'sent' | 'pending'): ErrorReport[] {
+  const all = getStoredReports();
+  const updated = all.map((r) => (r.id === id ? { ...r, status } : r));
+  saveAllReports(updated);
+  return updated;
+}
+
+export function deleteReport(id: string): ErrorReport[] {
+  const all = getStoredReports();
+  const filtered = all.filter((r) => r.id !== id);
+  saveAllReports(filtered);
+  return filtered;
+}
+
+export function clearAllReports(): void {
+  try {
+    localStorage.removeItem(STORAGE_KEYS.REPORTS);
+  } catch (e) {
+    console.error('Failed to clear reports:', e);
+  }
+}
+
+export function isTextReported(text: string): boolean {
+  if (!text) return false;
+  const all = getStoredReports();
+  const trimmed = text.trim().slice(0, 80);
+  return all.some((r) => r.exactText && r.exactText.trim().includes(trimmed));
+}
+

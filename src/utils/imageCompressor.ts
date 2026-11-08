@@ -1,11 +1,11 @@
 /**
- * Resizes an image to a maximum dimension (default 1280px) and compresses to JPEG quality 0.8
- * ensuring phone photos are under ~500KB for rapid upload.
+ * Resizes an image on the phone to a maximum dimension of 1024px on the longest side
+ * and compresses to JPEG quality 0.7, ensuring ultra-fast phone uploads.
  */
 export async function compressImageClient(
   fileOrBase64: File | string,
-  maxDimension = 1280,
-  quality = 0.8
+  maxDimension = 1024,
+  quality = 0.7
 ): Promise<{ dataUrl: string; sizeBytes: number; width: number; height: number }> {
   // In node environment (for testing) or browser
   if (typeof window === 'undefined' || typeof document === 'undefined') {
@@ -77,7 +77,7 @@ export async function compressImageClient(
 export function calculateResizeDimensions(
   origWidth: number,
   origHeight: number,
-  maxDim = 1280
+  maxDim = 1024
 ): { width: number; height: number } {
   if (origWidth <= maxDim && origHeight <= maxDim) {
     return { width: origWidth, height: origHeight };

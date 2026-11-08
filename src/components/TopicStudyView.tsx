@@ -19,13 +19,20 @@ import {
   ChevronRight,
   ChevronLeft,
   Layers,
+  Flag,
+  Send,
+  AlertTriangle,
 } from 'lucide-react';
 import { Question, SubjectId, TestAttempt, TopicRecord } from '../types/index.ts';
 import { Flashcard } from '../types/features.ts';
 import { SUBJECTS, calculateQuizScore, getScoreFeedback } from '../utils/studyLogic.ts';
-import { requestExplanation, requestQuiz, requestSummary, requestFlashcards } from '../services/api.ts';
-import { saveTopic, upsertFlashcards } from '../services/storage.ts';
+import { requestExplanation, requestExplanationStream, requestQuiz, requestSummary, requestFlashcards } from '../services/api.ts';
+import { saveTopic, upsertFlashcards, isTextReported } from '../services/storage.ts';
 import { MarkdownView } from './MarkdownView.tsx';
+import { ReportModal } from './ReportModal.tsx';
+import { shareToTelegram } from '../utils/shareUtils.ts';
+import { AiDisclaimerNotice } from './AiDisclaimerNotice.tsx';
+import { FriendlyErrorCard } from './FriendlyErrorCard.tsx';
 
 interface TopicStudyViewProps {
   topic: TopicRecord;
@@ -53,25 +60,46 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
   const [explanation, setExplanation] = useState<string>(topic.explanation || '');
   const [isLoadingExplain, setIsLoadingExplain] = useState<boolean>(false);
   const [explainError, setExplainError] = useState<string | null>(null);
+  const [explainFailures, setExplainFailures] = useState<number>(0);
 
   // Tab 3: Summary state
   const [summary, setSummary] = useState<string>(topic.summary || '');
   const [isLoadingSummary, setIsLoadingSummary] = useState<boolean>(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [summaryFailures, setSummaryFailures] = useState<number>(0);
 
   // Tab 4: Quiz state
   const [questions, setQuestions] = useState<Question[]>(topic.quiz || []);
   const [isLoadingQuiz, setIsLoadingQuiz] = useState<boolean>(false);
   const [quizError, setQuizError] = useState<string | null>(null);
+  const [quizFailures, setQuizFailures] = useState<number>(0);
   const [quizMode, setQuizMode] = useState<'single' | 'all'>(defaultQuizDisplayMode);
   const [currentQIndex, setCurrentQIndex] = useState<number>(0);
   const [userAnswers, setUserAnswers] = useState<Record<number, 'A' | 'B' | 'C' | 'D'>>({});
   const [isQuizCompleted, setIsQuizCompleted] = useState<boolean>(false);
 
-  // Copy feedback
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [isGeneratingCards, setIsGeneratingCards] = useState<boolean>(false);
   const [cardsCreatedCount, setCardsCreatedCount] = useState<number | null>(null);
+
+  // Error Report modal state
+  const [reportModalData, setReportModalData] = useState<{
+    isOpen: boolean;
+    exactText: string;
+    source: 'explanation' | 'summary' | 'quiz';
+  }>({
+    isOpen: false,
+    exactText: '',
+    source: 'explanation',
+  });
+
+  const openReport = (exactText: string, source: 'explanation' | 'summary' | 'quiz') => {
+    setReportModalData({
+      isOpen: true,
+      exactText,
+      source,
+    });
+  };
 
   const copyToClipboard = (text: string, key: string) => {
     navigator.clipboard.writeText(text);
@@ -99,6 +127,7 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
           answer: c.answer || '',
           imagePrompt: c.imagePrompt || '',
           hint: c.hint || '',
+          example: c.example || '',
           repetitions: 0,
           intervalDays: 0,
           nextReviewDate: today,
@@ -120,31 +149,63 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
     }
   };
 
-  // Lazy load Tab 2: Explanation
+  // Lazy load Tab 2: Explanation with fast streaming
   const loadExplanation = async (mode: 'default' | 'simpler' | 'another_example' | 'more_detailed' = 'default') => {
     setIsLoadingExplain(true);
     setExplainError(null);
+    let streamedText = '';
+
     try {
-      const res = await requestExplanation({
-        title: topic.title,
-        text: topic.cleanText,
-        subject: subject.name,
-        mode: mode,
-      });
-      setExplanation(res.explanation);
-      const updated = { ...topic, explanation: res.explanation };
-      onUpdateTopic(updated);
-      saveTopic(updated);
+      // Fast path: Stream chunks progressively
+      try {
+        await requestExplanationStream(
+          {
+            title: topic.title,
+            text: topic.cleanText,
+            subject: subject.name,
+            mode: mode,
+          },
+          (chunk) => {
+            streamedText += chunk;
+            setExplanation(streamedText);
+          }
+        );
+      } catch (streamErr) {
+        // Fallback to standard request if streaming fails
+        if (!streamedText) {
+          const res = await requestExplanation({
+            title: topic.title,
+            text: topic.cleanText,
+            subject: subject.name,
+            mode: mode,
+          });
+          streamedText = res.explanation;
+          setExplanation(streamedText);
+        }
+      }
+
+      if (streamedText) {
+        setExplainFailures(0);
+        const updated = { ...topic, explanation: streamedText };
+        onUpdateTopic(updated);
+        saveTopic(updated);
+      }
     } catch (err: any) {
-      setExplainError(err.message || 'Хатогӣ ҳангоми омодасозии шарҳ рух дод.');
+      const nextCount = explainFailures + 1;
+      setExplainFailures(nextCount);
+      if (nextCount >= 3) {
+        setExplainError('Пайвастшавӣ 3 маротиба бемуваффақият анҷом ёфт. Серверҳои Gemini муваққатан банданд ё интернет суст аст. Лутфан тугмаи «Дубора кӯшиш кунед»-ро пахш намоед.');
+      } else {
+        setExplainError(err.message || 'Хатогӣ ҳангоми омодасозии шарҳ рух дод.');
+      }
     } finally {
       setIsLoadingExplain(false);
     }
   };
 
-  // Lazy load Tab 3: Summary
-  const loadSummary = async () => {
-    if (summary) return;
+  // Lazy load Tab 3: Summary (Cached in browser)
+  const loadSummary = async (force = false) => {
+    if (!force && summary) return;
     setIsLoadingSummary(true);
     setSummaryError(null);
     try {
@@ -154,17 +215,24 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
         subject: subject.name,
       });
       setSummary(res.summary);
+      setSummaryFailures(0);
       const updated = { ...topic, summary: res.summary };
       onUpdateTopic(updated);
       saveTopic(updated);
     } catch (err: any) {
-      setSummaryError(err.message || 'Хатогӣ ҳангоми омодасозии конспект рух дод.');
+      const nextCount = summaryFailures + 1;
+      setSummaryFailures(nextCount);
+      if (nextCount >= 3) {
+        setSummaryError('Пайвастшавӣ 3 маротиба бемуваффақият анҷом ёфт. Серверҳои Gemini муваққатан банданд ё интернет суст аст. Лутфан тугмаи «Дубора кӯшиш кунед»-ро пахш намоед.');
+      } else {
+        setSummaryError(err.message || 'Хатогӣ ҳангоми омодасозии конспект рух дод.');
+      }
     } finally {
       setIsLoadingSummary(false);
     }
   };
 
-  // Lazy load Tab 4: Quiz
+  // Lazy load Tab 4: Quiz (Cached in browser)
   const loadQuiz = async (forceNew = false) => {
     if (!forceNew && questions.length > 0) return;
     setIsLoadingQuiz(true);
@@ -181,11 +249,18 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
         seed: Date.now(),
       });
       setQuestions(res.questions);
+      setQuizFailures(0);
       const updated = { ...topic, quiz: res.questions };
       onUpdateTopic(updated);
       saveTopic(updated);
     } catch (err: any) {
-      setQuizError(err.message || 'Хатогӣ ҳангоми омодасозии тест рух дод.');
+      const nextCount = quizFailures + 1;
+      setQuizFailures(nextCount);
+      if (nextCount >= 3) {
+        setQuizError('Пайвастшавӣ 3 маротиба бемуваффақият анҷом ёфт. Серверҳои Gemini муваққатан банданд ё интернет суст аст. Лутфан тугмаи «Дубора кӯшиш кунед»-ро пахш намоед.');
+      } else {
+        setQuizError(err.message || 'Хатогӣ ҳангоми омодасозии тест рух дод.');
+      }
     } finally {
       setIsLoadingQuiz(false);
     }
@@ -294,12 +369,12 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
           {isGeneratingCards ? (
             <>
               <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-              <span>Илмисино 10-15 карточка таҳия мекунад...</span>
+              <span>Илмисино 12 карточка бо расмҳо таҳия мекунад...</span>
             </>
           ) : (
             <>
               <Layers className="w-4 h-4" />
-              <span>🃏 Карточкаҳо сохтан</span>
+              <span>🃏 Карточкаҳо сохтан (12 дона)</span>
             </>
           )}
         </button>
@@ -392,6 +467,53 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
             </button>
           </div>
 
+          {(!topic.images || topic.images.length === 0) && (
+            <div className="p-4 rounded-2xl bg-linear-to-r from-emerald-50 to-teal-50 dark:from-emerald-950/40 dark:to-teal-950/40 border border-emerald-200 dark:border-emerald-800 space-y-3">
+              <div className="flex items-center gap-2 text-emerald-800 dark:text-emerald-300 font-bold text-sm">
+                <Sparkles className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                <span>Мавзӯи навишташуда аз дониши Илмисино</span>
+              </div>
+              <p className="text-xs text-slate-600 dark:text-slate-300">
+                Барои ин мавзӯъ шарҳи фаврии кӯтоҳ омода шуд. Барои омӯзиши амиқтар, санҷиш ё сохтани кортҳо яке аз тугмаҳои зеринро пахш намоед:
+              </p>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('explain')}
+                  className="py-2.5 px-3 rounded-xl bg-white dark:bg-slate-800 hover:bg-emerald-100 dark:hover:bg-slate-700 text-slate-800 dark:text-white font-bold text-xs border border-emerald-200 dark:border-slate-700 flex items-center justify-center gap-1.5 shadow-xs transition-colors"
+                >
+                  <HelpCircle className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>📖 Шарҳи пурра</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('summary')}
+                  className="py-2.5 px-3 rounded-xl bg-white dark:bg-slate-800 hover:bg-indigo-100 dark:hover:bg-slate-700 text-slate-800 dark:text-white font-bold text-xs border border-indigo-200 dark:border-slate-700 flex items-center justify-center gap-1.5 shadow-xs transition-colors"
+                >
+                  <FileText className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>📝 Конспект</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('quiz')}
+                  className="py-2.5 px-3 rounded-xl bg-white dark:bg-slate-800 hover:bg-amber-100 dark:hover:bg-slate-700 text-slate-800 dark:text-white font-bold text-xs border border-amber-200 dark:border-slate-700 flex items-center justify-center gap-1.5 shadow-xs transition-colors"
+                >
+                  <CheckSquare className="w-3.5 h-3.5 text-amber-600" />
+                  <span>✅ Тест (10 савол)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleGenerateCards}
+                  disabled={isGeneratingCards}
+                  className="py-2.5 px-3 rounded-xl bg-white dark:bg-slate-800 hover:bg-purple-100 dark:hover:bg-slate-700 text-slate-800 dark:text-white font-bold text-xs border border-purple-200 dark:border-slate-700 flex items-center justify-center gap-1.5 shadow-xs transition-colors"
+                >
+                  <Layers className="w-3.5 h-3.5 text-purple-600" />
+                  <span>🃏 Карточкаҳо</span>
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="prose dark:prose-invert max-w-none text-slate-800 dark:text-slate-200">
             <MarkdownView content={topic.cleanText} />
           </div>
@@ -401,7 +523,7 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
       {/* TAB 2: ФАҲМОН (EXPLAIN) */}
       {activeTab === 'explain' && (
         <div className="bg-white dark:bg-slate-900 rounded-3xl p-5 sm:p-7 border border-slate-200 dark:border-slate-800 shadow-xs space-y-6">
-          <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800 gap-3">
             <div>
               <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
                 <span>Шарҳи сода барои мактаббача</span>
@@ -413,6 +535,31 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
                 Барои хонандагони 14-сола бо мисолҳои деҳа, нон, об ва табиати кишвар
               </p>
             </div>
+
+            {explanation && !isLoadingExplain && (
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() =>
+                    shareToTelegram({
+                      title: topic.title,
+                      text: `💡 Шарҳи содаи «${topic.title}» дар Илмисино:\n\n${explanation.slice(0, 450)}...`,
+                    })
+                  }
+                  className="px-3 py-1.5 rounded-xl bg-sky-50 dark:bg-sky-950/60 border border-sky-200 dark:border-sky-800 text-sky-700 dark:text-sky-300 text-xs font-bold flex items-center gap-1.5 hover:bg-sky-100 transition-colors"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>Ба Telegram</span>
+                </button>
+
+                <button
+                  onClick={() => openReport(explanation, 'explanation')}
+                  className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-amber-50 dark:hover:bg-amber-950/50 text-slate-600 dark:text-slate-300 hover:text-amber-700 dark:hover:text-amber-300 text-xs font-bold flex items-center gap-1.5 transition-colors"
+                >
+                  <Flag className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Хато ёфтам</span>
+                </button>
+              </div>
+            )}
           </div>
 
           {isLoadingExplain ? (
@@ -426,23 +573,40 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
               </p>
             </div>
           ) : explainError ? (
-            <div className="p-4 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 text-xs space-y-2">
-              <div className="flex items-center gap-2 font-bold">
-                <AlertCircle className="w-4 h-4" />
-                <span>{explainError}</span>
-              </div>
-              <button
-                onClick={() => loadExplanation('default')}
-                className="px-3 py-1.5 rounded-xl bg-rose-600 text-white font-bold text-xs"
-              >
-                Дубора кӯшиш кунед
-              </button>
-            </div>
+            <FriendlyErrorCard
+              error={explainError}
+              onRetry={() => loadExplanation('default')}
+              onOpenCards={onGoToCards}
+            />
           ) : (
             <div className="space-y-6">
+              {isTextReported(explanation) && (
+                <div className="p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs flex flex-wrap items-center justify-between gap-2 animate-fade-in">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span className="font-semibold">Ин ҷавоб ҳамчун хато қайд шудааст</span>
+                  </div>
+                  <button
+                    onClick={() => loadExplanation('default')}
+                    disabled={isLoadingExplain}
+                    className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs flex items-center gap-1.5 shadow-xs transition-transform active:scale-95"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Дубора тавлид кун</span>
+                  </button>
+                </div>
+              )}
+
               <div className="prose dark:prose-invert max-w-none">
                 <MarkdownView content={explanation} />
               </div>
+
+              {/* AI Disclaimer notice with text-to-speech & report flag sitting together */}
+              <AiDisclaimerNotice
+                variant="full"
+                speakableText={explanation}
+                onReport={() => openReport(explanation, 'explanation')}
+              />
 
               {/* Action Buttons at bottom of Tab 2 */}
               <div className="pt-4 border-t border-slate-100 dark:border-slate-800 space-y-2">
@@ -499,7 +663,32 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
               </p>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {summary && !isLoadingSummary && (
+                <>
+                  <button
+                    onClick={() =>
+                      shareToTelegram({
+                        title: topic.title,
+                        text: `📚 Конспекти дафтар: «${topic.title}» (${subject.name})\n\n${summary.slice(0, 500)}...`,
+                      })
+                    }
+                    className="px-3 py-1.5 rounded-xl bg-sky-50 dark:bg-sky-950/60 border border-sky-200 dark:border-sky-800 text-sky-700 dark:text-sky-300 text-xs font-bold flex items-center gap-1.5 hover:bg-sky-100 transition-colors"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    <span>Ба Telegram</span>
+                  </button>
+
+                  <button
+                    onClick={() => openReport(summary, 'summary')}
+                    className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-amber-50 dark:hover:bg-amber-950/50 text-slate-600 dark:text-slate-300 hover:text-amber-700 dark:hover:text-amber-300 text-xs font-bold flex items-center gap-1.5 transition-colors"
+                  >
+                    <Flag className="w-3.5 h-3.5 text-amber-500" />
+                    <span>Хато ёфтам</span>
+                  </button>
+                </>
+              )}
+
               <button
                 onClick={() => copyToClipboard(summary, 'summary')}
                 className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 text-xs font-bold flex items-center gap-1.5 transition-colors"
@@ -538,21 +727,40 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
               </p>
             </div>
           ) : summaryError ? (
-            <div className="p-4 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 text-xs space-y-2">
-              <div className="flex items-center gap-2 font-bold">
-                <AlertCircle className="w-4 h-4" />
-                <span>{summaryError}</span>
-              </div>
-              <button
-                onClick={loadSummary}
-                className="px-3 py-1.5 rounded-xl bg-rose-600 text-white font-bold text-xs"
-              >
-                Дубора кӯшиш кунед
-              </button>
-            </div>
+            <FriendlyErrorCard
+              error={summaryError}
+              onRetry={() => loadSummary(true)}
+              onOpenCards={onGoToCards}
+            />
           ) : (
-            <div className="prose dark:prose-invert max-w-none p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200/60 dark:border-slate-800 font-mono text-xs sm:text-sm">
-              <MarkdownView content={summary} />
+            <div className="space-y-4">
+              {isTextReported(summary) && (
+                <div className="p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs flex flex-wrap items-center justify-between gap-2 animate-fade-in">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span className="font-semibold">Ин конспект ҳамчун хато қайд шудааст</span>
+                  </div>
+                  <button
+                    onClick={() => loadSummary(true)}
+                    disabled={isLoadingSummary}
+                    className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs flex items-center gap-1.5 shadow-xs transition-transform active:scale-95"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Дубора тавлид кун</span>
+                  </button>
+                </div>
+              )}
+
+              <div className="prose dark:prose-invert max-w-none p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200/60 dark:border-slate-800 font-mono text-xs sm:text-sm">
+                <MarkdownView content={summary} />
+              </div>
+
+              {/* AI Disclaimer notice with text-to-speech & report flag sitting together */}
+              <AiDisclaimerNotice
+                variant="full"
+                speakableText={summary}
+                onReport={() => openReport(summary, 'summary')}
+              />
             </div>
           )}
         </div>
@@ -606,18 +814,11 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
               </p>
             </div>
           ) : quizError ? (
-            <div className="p-4 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 text-xs space-y-2">
-              <div className="flex items-center gap-2 font-bold">
-                <AlertCircle className="w-4 h-4" />
-                <span>{quizError}</span>
-              </div>
-              <button
-                onClick={() => loadQuiz(true)}
-                className="px-3 py-1.5 rounded-xl bg-rose-600 text-white font-bold text-xs"
-              >
-                Дубора кӯшиш кунед
-              </button>
-            </div>
+            <FriendlyErrorCard
+              error={quizError}
+              onRetry={() => loadQuiz(true)}
+              onOpenCards={onGoToCards}
+            />
           ) : questions.length === 0 ? (
             <div className="py-8 text-center space-y-3">
               <p className="text-xs text-slate-500">Барои ин мавзӯъ тести нав омода кунед.</p>
@@ -653,7 +854,7 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
                         </p>
                       </div>
 
-                      <div className="pt-2 flex justify-center gap-3">
+                      <div className="pt-2 flex flex-wrap justify-center gap-3">
                         <button
                           onClick={() => {
                             setUserAnswers({});
@@ -664,6 +865,20 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
                         >
                           Аз нав санҷед
                         </button>
+
+                        <button
+                          onClick={() =>
+                            shareToTelegram({
+                              title: `Натиҷаи тест: ${topic.title}`,
+                              text: `Ман дар Илмисино аз фанни ${subject.name} аз рӯи мавзӯи «${topic.title}» ${score}/${total} (${percentage}%) гирифтам! Ту ҳам кӯшиш кун 💪`,
+                            })
+                          }
+                          className="px-4 py-2 rounded-xl bg-sky-500 hover:bg-sky-600 text-white font-bold text-xs flex items-center gap-1.5 shadow-md shadow-sky-500/20 transition-transform active:scale-95"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          <span>✈️ Ба Telegram фиристодан</span>
+                        </button>
+
                         <button
                           onClick={() => loadQuiz(true)}
                           className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-md shadow-emerald-600/25 transition-transform active:scale-95"
@@ -698,8 +913,20 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
                                   Ҷавоби дуруст: {m.question.correct}) {m.question.options[m.question.correct]}
                                 </span>
                               </div>
-                              <div className="text-slate-600 dark:text-slate-400 italic bg-white/60 dark:bg-slate-900/60 p-2.5 rounded-xl border border-rose-100 dark:border-rose-950">
-                                💡 {m.question.explanation}
+                              <div className="text-slate-600 dark:text-slate-400 italic bg-white/60 dark:bg-slate-900/60 p-2.5 rounded-xl border border-rose-100 dark:border-rose-950 flex items-start justify-between gap-2">
+                                <div>💡 {m.question.explanation}</div>
+                                <button
+                                  onClick={() =>
+                                    openReport(
+                                      `Савол: ${m.question.question} | Ҷавоби дуруст: ${m.question.correct}) ${m.question.options[m.question.correct]} | Шарҳ: ${m.question.explanation}`,
+                                      'quiz'
+                                    )
+                                  }
+                                  className="text-[10px] text-slate-400 hover:text-amber-600 font-bold flex items-center gap-1 shrink-0 ml-2"
+                                >
+                                  <Flag className="w-3 h-3 text-amber-500" />
+                                  <span>Хато ёфтам</span>
+                                </button>
                               </div>
                             </div>
                           ))}
@@ -740,9 +967,23 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
                 return (
                   <div className="space-y-4">
                     <div className="p-4 sm:p-5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700">
-                      <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block mb-1">
-                        Саволи #{currentQIndex + 1}
-                      </span>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">
+                          Саволи #{currentQIndex + 1}
+                        </span>
+                        <button
+                          onClick={() =>
+                            openReport(
+                              `Саволи #${currentQIndex + 1}: ${q.question} | Ҷавоби дуруст: ${q.correct}) ${q.options[q.correct]}`,
+                              'quiz'
+                            )
+                          }
+                          className="text-[11px] font-bold text-slate-400 hover:text-amber-600 flex items-center gap-1 transition-colors"
+                        >
+                          <Flag className="w-3 h-3 text-amber-500" />
+                          <span>Хато ёфтам</span>
+                        </button>
+                      </div>
                       <h3 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white leading-relaxed">
                         {q.question}
                       </h3>
@@ -802,11 +1043,21 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
 
                     {/* Instant Explanation Box */}
                     {isAnswered && (
-                      <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-900 dark:text-amber-200 text-xs space-y-1 animate-fade-in">
+                      <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-900 dark:text-amber-200 text-xs space-y-2 animate-fade-in">
                         <span className="font-bold flex items-center gap-1.5 text-amber-800 dark:text-amber-300">
                           💡 Шарҳи ҷавоб:
                         </span>
                         <p className="leading-relaxed">{q.explanation}</p>
+                        <AiDisclaimerNotice
+                          variant="short"
+                          speakableText={q.explanation}
+                          onReport={() =>
+                            openReport(
+                              `Саволи #${currentQIndex + 1}: ${q.question} | Ҷавоби дуруст: ${q.correct}) ${q.options[q.correct]} | Шарҳ: ${q.explanation}`,
+                              'quiz'
+                            )
+                          }
+                        />
                       </div>
                     )}
 
@@ -860,6 +1111,19 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
                         <span className="text-emerald-600 dark:text-emerald-400 mr-1.5">{idx + 1}.</span>
                         {q.question}
                       </h4>
+
+                      <button
+                        onClick={() =>
+                          openReport(
+                            `Саволи #${idx + 1}: ${q.question} | Ҷавоби дуруст: ${q.correct}) ${q.options[q.correct]}`,
+                            'quiz'
+                          )
+                        }
+                        className="text-[11px] font-bold text-slate-400 hover:text-amber-600 flex items-center gap-1 transition-colors shrink-0"
+                      >
+                        <Flag className="w-3 h-3 text-amber-500" />
+                        <span>Хато ёфтам</span>
+                      </button>
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -907,8 +1171,18 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
                     </div>
 
                     {isAnswered && (
-                      <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200/80 dark:border-amber-900/60 text-amber-900 dark:text-amber-200 text-xs">
-                        💡 {q.explanation}
+                      <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200/80 dark:border-amber-900/60 text-amber-900 dark:text-amber-200 text-xs space-y-2">
+                        <div>💡 {q.explanation}</div>
+                        <AiDisclaimerNotice
+                          variant="short"
+                          speakableText={q.explanation}
+                          onReport={() =>
+                            openReport(
+                              `Саволи #${idx + 1}: ${q.question} | Ҷавоби дуруст: ${q.correct}) ${q.options[q.correct]} | Шарҳ: ${q.explanation}`,
+                              'quiz'
+                            )
+                          }
+                        />
                       </div>
                     )}
                   </div>
@@ -939,6 +1213,16 @@ export const TopicStudyView: React.FC<TopicStudyViewProps> = ({
         </div>
         <span>💬 Аз Илмисино бипурс</span>
       </button>
+
+      {/* Mistake Report Modal */}
+      <ReportModal
+        isOpen={reportModalData.isOpen}
+        onClose={() => setReportModalData((prev) => ({ ...prev, isOpen: false }))}
+        subject={subject.name}
+        topicTitle={topic.title}
+        exactText={reportModalData.exactText}
+        source={reportModalData.source}
+      />
     </div>
   );
 };

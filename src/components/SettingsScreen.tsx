@@ -13,24 +13,32 @@ import {
   Loader2,
   XCircle,
   Cpu,
+  Flag,
+  Share2,
 } from 'lucide-react';
 import { AppSettings } from '../types/index.ts';
 import { requestSelfTest } from '../services/api.ts';
+import { ErrorReportsModal } from './ErrorReportsModal.tsx';
+import { getStoredReports } from '../services/storage.ts';
+import { inviteFriends } from '../utils/shareUtils.ts';
 
 interface SettingsScreenProps {
   settings: AppSettings;
   onUpdateSettings: (newSettings: Partial<AppSettings>) => void;
   onClearAllData: () => void;
+  onShowOnboarding?: () => void;
 }
 
 export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   settings,
   onUpdateSettings,
   onClearAllData,
+  onShowOnboarding,
 }) => {
   const [apiKeyInput, setApiKeyInput] = useState<string>(settings.customApiKey || '');
   const [showKeySaved, setShowKeySaved] = useState<boolean>(false);
   const [showClearConfirm, setShowClearConfirm] = useState<boolean>(false);
+  const [showErrorReportsModal, setShowErrorReportsModal] = useState<boolean>(false);
 
   // Self-test states
   const [isTesting, setIsTesting] = useState<boolean>(false);
@@ -332,6 +340,86 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         )}
       </div>
 
+      {/* Error Reports (Ҳисоботи хатоҳо) */}
+      <div className="bg-white dark:bg-slate-900 rounded-3xl p-5 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="p-2 rounded-xl bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400">
+              <Flag className="w-4 h-4 fill-amber-500" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm font-bold text-slate-900 dark:text-white">
+                  Ҳисоботи хатоҳо
+                </h2>
+                <span className="px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 font-extrabold text-[10px]">
+                  {getStoredReports().length}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Хатогиҳои гузоришшуда бо имкони фиристодан ба Telegram ё нусхабардорӣ
+              </p>
+            </div>
+          </div>
+
+          <button
+            onClick={() => setShowErrorReportsModal(true)}
+            className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs shadow-xs transition-transform active:scale-95 shrink-0"
+          >
+            Дидани гузоришҳо
+          </button>
+        </div>
+      </div>
+
+      {/* Invite Friends (Дӯстонро даъват кун) */}
+      <div className="bg-gradient-to-r from-emerald-600 to-teal-700 text-white rounded-3xl p-5 shadow-lg shadow-emerald-600/20 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <Share2 className="w-5 h-5 text-emerald-200" />
+            <h2 className="text-base font-extrabold">Дӯстонро даъват кун</h2>
+          </div>
+          <p className="text-xs text-emerald-100 max-w-md leading-relaxed">
+            Илмисиноро ба ҳамсинфон ва дӯстонатон тавсия диҳед, то онҳо низ ба имтиҳони ММТ омода шаванд!
+          </p>
+        </div>
+
+        <button
+          onClick={() => inviteFriends()}
+          className="px-5 py-2.5 rounded-2xl bg-white text-emerald-900 hover:bg-emerald-50 font-black text-xs shadow-md transition-transform active:scale-95 shrink-0 flex items-center gap-2"
+        >
+          <Share2 className="w-3.5 h-3.5 text-emerald-600" />
+          <span>Равона кардан</span>
+        </button>
+      </div>
+
+      {/* Onboarding Welcome Cards (Муаррифии аввалия) */}
+      <div className="bg-white dark:bg-slate-900 rounded-3xl p-5 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="p-2 rounded-xl bg-emerald-100 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400">
+              <Sparkles className="w-4 h-4" />
+            </div>
+            <div>
+              <h2 className="text-sm font-bold text-slate-900 dark:text-white">
+                Муаррифии барнома (Onboarding)
+              </h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Корти шиносоӣ ва дастури истифодаи Илмисино
+              </p>
+            </div>
+          </div>
+
+          {onShowOnboarding && (
+            <button
+              onClick={onShowOnboarding}
+              className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-xs transition-transform active:scale-95 shrink-0"
+            >
+              Дубора нишон деҳ
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Clear All Data */}
       <div className="bg-white dark:bg-slate-900 rounded-3xl p-5 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
         <div className="flex items-center gap-2">
@@ -394,6 +482,12 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
           «Илмисино» ёрдамчии бемаҳдуди ҳушманди мактабиён ва довталабони Маркази миллии тестӣ (ММТ)-и назди Президенти Ҷумҳурии Тоҷикистон мебошад. Барнома барои фаҳмонидани содаи фанҳои дақиқ (Химия, Физика, Биология) ва забони тоҷикӣ бо истифодаи модели муосири Gemini тарҳрезӣ шудааст.
         </p>
       </div>
+
+      {/* Error Reports Modal */}
+      <ErrorReportsModal
+        isOpen={showErrorReportsModal}
+        onClose={() => setShowErrorReportsModal(false)}
+      />
     </div>
   );
 };

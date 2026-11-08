@@ -16,6 +16,7 @@ import { SAMPLE_TOPICS, SUBJECTS } from '../utils/studyLogic.ts';
 import { compressImageClient } from '../utils/imageCompressor.ts';
 import { requestOcr } from '../services/api.ts';
 import { saveTopic } from '../services/storage.ts';
+import { FriendlyErrorCard } from './FriendlyErrorCard.tsx';
 
 interface AddTopicModalProps {
   initialSubjectId: SubjectId;
@@ -39,6 +40,7 @@ export const AddTopicModal: React.FC<AddTopicModalProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [loadingStep, setLoadingStep] = useState<string>('Илмисино саҳифаро мехонад...');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [failureCount, setFailureCount] = useState<number>(0);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
@@ -46,7 +48,7 @@ export const AddTopicModal: React.FC<AddTopicModalProps> = ({
 
   const currentSubject = SUBJECTS[subjectId];
 
-  // Handle files selection with client-side compression
+  // Handle files selection with client-side compression (max 1024px, quality 0.7)
   const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     setErrorMessage(null);
@@ -68,8 +70,8 @@ export const AddTopicModal: React.FC<AddTopicModalProps> = ({
           continue;
         }
 
-        // Compress image on client down to max 1280px and quality 0.8 (<500KB)
-        const compressed = await compressImageClient(file, 1280, 0.8);
+        // Compress image on client down to max 1024px and quality 0.7
+        const compressed = await compressImageClient(file, 1024, 0.7);
         const sizeKb = Math.round(compressed.sizeBytes / 1024);
 
         setImages((prev) => [
@@ -156,7 +158,8 @@ export const AddTopicModal: React.FC<AddTopicModalProps> = ({
             subject: currentSubject.name,
             option: option,
           },
-          abortController.signal
+          abortController.signal,
+          (_att, _max, msg) => setLoadingStep(msg)
         );
       }
 
@@ -176,6 +179,7 @@ export const AddTopicModal: React.FC<AddTopicModalProps> = ({
       };
 
       saveTopic(newTopic);
+      setFailureCount(0);
       setIsLoading(false);
       onTopicCreated(newTopic);
     } catch (err: any) {
@@ -185,8 +189,14 @@ export const AddTopicModal: React.FC<AddTopicModalProps> = ({
       }
       console.error('Error reading topic:', err);
       setIsLoading(false);
+      const nextCount = failureCount + 1;
+      setFailureCount(nextCount);
       // Keep images and topicName intact so user does not lose input
-      setErrorMessage(err.message || 'Хатогӣ рух дод. Лутфан тугмаи «Дубора кӯшиш кунед»-ро пахш намоед.');
+      if (nextCount >= 3) {
+        setErrorMessage('Пайвастшавӣ 3 маротиба бемуваффақият анҷом ёфт. Серверҳои Gemini муваққатан банданд ё интернет суст аст. Лутфан тугмаи «Дубора кӯшиш кунед»-ро пахш намоед.');
+      } else {
+        setErrorMessage(err.message || 'Хатогӣ рух дод. Лутфан тугмаи «Дубора кӯшиш кунед»-ро пахш намоед.');
+      }
     }
   };
 
@@ -428,22 +438,12 @@ export const AddTopicModal: React.FC<AddTopicModalProps> = ({
             </div>
           </div>
 
-          {/* Error message with retry */}
+          {/* Error message with friendly waiting & retry */}
           {errorMessage && (
-            <div className="p-4 rounded-2xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 text-xs space-y-2">
-              <div className="flex items-start gap-2.5">
-                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                <div className="leading-relaxed font-medium">{errorMessage}</div>
-              </div>
-              <button
-                type="button"
-                onClick={handleStart}
-                className="px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs flex items-center gap-1.5"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>Дубора кӯшиш кунед</span>
-              </button>
-            </div>
+            <FriendlyErrorCard
+              error={errorMessage}
+              onRetry={handleStart}
+            />
           )}
 
           {/* Loading Animation with Cancel button */}

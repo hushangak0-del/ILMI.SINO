@@ -18,8 +18,14 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 const SYSTEM_INSTRUCTION = `You are Илмисино, a patient, kind and accurate teacher for Tajik school students preparing for the ММТ exam. Always write in correct literary Tajik (Cyrillic). Never mix in Russian words when a Tajik word exists. Use standard Tajik school terminology (for example: 'атом', 'молекула', 'реаксияи химиявӣ', 'ҳуҷайра'). Keep sentences short and simple. Re-read your answer and fix grammar before replying.`;
 
-// In-memory record of current working model (gemini-3.1-flash-lite verified working)
-let lastWorkingModel = 'gemini-3.1-flash-lite';
+// Stable fast Flash models fallback configuration
+export const FALLBACK_MODELS = [
+  'gemini-3.8-flash',      // Primary newest stable fast Flash model
+  'gemini-3.1-flash-lite', // Secondary ultra-fast Flash-Lite model
+  'gemini-flash-latest',   // Older stable Flash model
+] as const;
+
+let lastWorkingModel: string = FALLBACK_MODELS[0];
 
 function getGenAI(req: Request): GoogleGenAI {
   const customKey = req.headers['x-gemini-key'] as string | undefined;
@@ -39,6 +45,28 @@ function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const TIMEOUT_MS = 25000; // 25 seconds timeout per attempt
+
+function withTimeout<T>(promise: Promise<T>, ms: number = TIMEOUT_MS): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const err: any = new Error(`Талабот пас аз ${ms / 1000} сония қатъ шуд (Timeout 25s)`);
+      err.status = 504;
+      reject(err);
+    }, ms);
+
+    promise
+      .then((val) => {
+        clearTimeout(timer);
+        resolve(val);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
 function isQuotaExceededError(err: any): boolean {
   if (!err) return false;
   const msg = String(err.message || '').toLowerCase();
@@ -54,11 +82,24 @@ function isRetryableError(err: any): boolean {
   if (status === 400 || status === 401 || status === 403) return false;
   if (message.includes('api_key') || message.includes('apikey') || message.includes('invalid_argument') || message.includes('permission_denied') || message.includes('unregistered')) return false;
 
-  if (status === 503 || status === 429) return true;
-  if (message.includes('503') || message.includes('unavailable') || message.includes('high demand')) return true;
+  if (status === 503 || status === 504 || status === 500 || status === 429) return true;
+  if (message.includes('503') || message.includes('504') || message.includes('500') || message.includes('unavailable') || message.includes('high demand')) return true;
   if (message.includes('429') || message.includes('rate limit')) return true;
-  if (message.includes('econnreset') || message.includes('etimedout') || message.includes('fetch failed')) return true;
+  if (message.includes('econnreset') || message.includes('etimedout') || message.includes('fetch failed') || message.includes('timeout')) return true;
   return false;
+}
+
+function extractStatusCode(err: any): string | number {
+  if (!err) return 'UNKNOWN';
+  if (err.status) return err.status;
+  if (err.statusCode) return err.statusCode;
+  if (err.response?.status) return err.response.status;
+  const msg = String(err.message || '').toLowerCase();
+  if (msg.includes('503')) return 503;
+  if (msg.includes('429')) return 429;
+  if (msg.includes('500')) return 500;
+  if (msg.includes('timeout') || msg.includes('504')) return 504;
+  return 'ERR';
 }
 
 function formatTajikErrorMessage(err: any): string {
@@ -66,10 +107,13 @@ function formatTajikErrorMessage(err: any): string {
   const status = err?.status || err?.statusCode;
 
   if (status === 503 || msg.includes('503') || msg.includes('high demand') || msg.includes('unavailable')) {
-    return 'Серверҳои Google айни замон хеле банданд (503). Лутфан 1-2 дақиқа интизор шавед ва тугмаи «Дубора кӯшиш кунед»-ро пахш намоед.';
+    return 'Серверҳо ҳоло банданд. Лутфан 1-2 дақиқа интизор шавед.';
+  }
+  if (status === 504 || msg.includes('timeout') || msg.includes('504')) {
+    return 'Вақти посух аз сервер гузашт (25 сония). Лутфан дубора кӯшиш кунед.';
   }
   if (status === 429 || msg.includes('429') || msg.includes('resource_exhausted') || msg.includes('quota')) {
-    return 'Лимит тамом шуд (429). Лутфан пас аз як дақиқа такроран кӯшиш кунед ё дар Танзимот калиди шахсӣ ворид намоед.';
+    return 'Лимити имрӯза тамом шуд. Пагоҳ дубора кӯшиш кунед.';
   }
   if (status === 400 || status === 401 || status === 403 || msg.includes('api_key') || msg.includes('apikey') || msg.includes('unregistered') || msg.includes('permission_denied')) {
     return 'Калиди API ворид нашудааст ё нодуруст аст. Лутфан калидро дар Танзимот тафтиш кунед.';
@@ -88,61 +132,72 @@ interface GenerateOptions {
 }
 
 /**
- * Robust execution with fast model fallback:
- * Priority to current working model (gemini-3.1-flash-lite / gemini-3.8-flash)
+ * 4-attempt fallback sequence:
+ * Attempt 1: primary Flash (gemini-3.8-flash)
+ * Attempt 2: retry on primary Flash after 2000ms delay
+ * Attempt 3: Flash-Lite (gemini-3.1-flash-lite)
+ * Attempt 4: older stable Flash (gemini-flash-latest)
  */
 async function generateWithFallbackAndRetry(
   ai: GoogleGenAI,
   contents: any,
   options: GenerateOptions = {}
 ): Promise<{ text: string; modelUsed: string }> {
-  const modelsToTry = lastWorkingModel === 'gemini-3.1-flash-lite'
-    ? ['gemini-3.1-flash-lite', 'gemini-3.8-flash']
-    : ['gemini-3.8-flash', 'gemini-3.1-flash-lite'];
+  const plan = [
+    { attempt: 1, model: FALLBACK_MODELS[0], delayBeforeMs: 0 },
+    { attempt: 2, model: FALLBACK_MODELS[0], delayBeforeMs: 2000 },
+    { attempt: 3, model: FALLBACK_MODELS[1], delayBeforeMs: 0 },
+    { attempt: 4, model: FALLBACK_MODELS[2], delayBeforeMs: 0 },
+  ];
 
   let lastError: any = null;
 
-  for (const model of modelsToTry) {
-    for (let attempt = 0; attempt <= 1; attempt++) {
-      try {
-        const config: any = {
-          systemInstruction: options.systemInstruction || SYSTEM_INSTRUCTION,
-          temperature: options.temperature !== undefined ? options.temperature : 0.3,
-        };
+  for (const step of plan) {
+    const { attempt, model, delayBeforeMs } = step;
 
-        if (options.responseMimeType) {
-          config.responseMimeType = options.responseMimeType;
-        }
-        if (options.responseSchema) {
-          config.responseSchema = options.responseSchema;
-        }
+    if (delayBeforeMs > 0) {
+      await delay(delayBeforeMs);
+    }
 
-        const response = await ai.models.generateContent({
+    const startTime = Date.now();
+
+    try {
+      const config: any = {
+        systemInstruction: options.systemInstruction || SYSTEM_INSTRUCTION,
+        temperature: options.temperature !== undefined ? options.temperature : 0.3,
+      };
+
+      if (options.responseMimeType) {
+        config.responseMimeType = options.responseMimeType;
+      }
+      if (options.responseSchema) {
+        config.responseSchema = options.responseSchema;
+      }
+
+      const response = await withTimeout(
+        ai.models.generateContent({
           model,
           contents,
           config,
-        });
+        }),
+        TIMEOUT_MS
+      );
 
-        if (response.text) {
-          lastWorkingModel = model;
-          return { text: response.text, modelUsed: model };
-        }
-        throw new Error('Посухи холӣ аз модел.');
-      } catch (err: any) {
-        lastError = err;
-        console.warn(`Attempt ${attempt + 1} with model ${model} failed:`, err?.message || err);
+      if (response.text) {
+        const durationSec = ((Date.now() - startTime) / 1000).toFixed(1);
+        console.log(`[Gemini OK] Model: ${model} answered in ${durationSec}s (Attempt ${attempt}/4)`);
+        lastWorkingModel = model;
+        return { text: response.text, modelUsed: model };
+      }
+      throw new Error('Посухи холӣ аз модел.');
+    } catch (err: any) {
+      lastError = err;
+      const durationSec = ((Date.now() - startTime) / 1000).toFixed(1);
+      const statusCode = extractStatusCode(err);
+      console.warn(`[Gemini FAIL] Attempt ${attempt}/4 | Model: ${model} | Error Code: ${statusCode} | Duration: ${durationSec}s | Message: ${err?.message || err}`);
 
-        // If daily quota or resource is exhausted on this model, instantly switch to alternative model
-        if (isQuotaExceededError(err)) {
-          console.log(`Model ${model} quota exhausted. Immediately switching to fallback model...`);
-          break;
-        }
-
-        if (attempt < 1 && isRetryableError(err)) {
-          console.log(`Retrying model ${model} in 1000ms...`);
-          await delay(1000);
-          continue;
-        }
+      // Permanent non-retryable auth/client error
+      if (!isRetryableError(err) && !isQuotaExceededError(err)) {
         break;
       }
     }
@@ -247,6 +302,164 @@ app.all('/api/self-test', async (req: Request, res: Response): Promise<void> => 
   }
 });
 
+// ==========================================
+// Rate Limiting (In-Memory per Client IP)
+// ==========================================
+interface RateLimitBucket {
+  count: number;
+  resetAt: number;
+}
+
+// 60 AI requests per IP per hour
+const aiRateLimitMap = new Map<string, RateLimitBucket>();
+const AI_RATE_LIMIT = 60;
+const AI_WINDOW_MS = 60 * 60 * 1000;
+
+// 5 report requests per IP per hour
+const reportRateLimitMap = new Map<string, RateLimitBucket>();
+const REPORT_RATE_LIMIT = 5;
+const REPORT_WINDOW_MS = 60 * 60 * 1000;
+
+function getClientIp(req: Request): string {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string') {
+    return forwarded.split(',')[0].trim();
+  }
+  return req.socket.remoteAddress || '127.0.0.1';
+}
+
+function checkRateLimit(map: Map<string, RateLimitBucket>, ip: string, limit: number, windowMs: number): boolean {
+  const now = Date.now();
+  const bucket = map.get(ip);
+  if (!bucket || now > bucket.resetAt) {
+    map.set(ip, { count: 1, resetAt: now + windowMs });
+    return true;
+  }
+  if (bucket.count >= limit) {
+    return false;
+  }
+  bucket.count++;
+  return true;
+}
+
+// Middleware: limit AI routes to 60 requests per user per hour
+function aiRateLimitMiddleware(req: Request, res: Response, next: () => void): void {
+  const ip = getClientIp(req);
+  if (!checkRateLimit(aiRateLimitMap, ip, AI_RATE_LIMIT, AI_WINDOW_MS)) {
+    res.status(429).json({ error: 'Лимити соатона тамом шуд, баъди чанд дақиқа кӯшиш кунед' });
+    return;
+  }
+  next();
+}
+
+// Mount AI rate limiter
+app.use(
+  [
+    '/api/ocr',
+    '/api/explain',
+    '/api/explain-stream',
+    '/api/stream',
+    '/api/summary',
+    '/api/quiz',
+    '/api/chat',
+    '/api/solve',
+    '/api/solve-problem',
+    '/api/flashcards',
+    '/api/card-image',
+    '/api/exam-batch',
+    '/api/study-plan',
+  ],
+  aiRateLimitMiddleware
+);
+
+// ==========================================
+// POST /api/report (Error reporting with Telegram delivery)
+// ==========================================
+app.post('/api/report', async (req: Request, res: Response): Promise<void> => {
+  const ip = getClientIp(req);
+  if (!checkRateLimit(reportRateLimitMap, ip, REPORT_RATE_LIMIT, REPORT_WINDOW_MS)) {
+    res.status(429).json({
+      error: 'Шумо дар як соат танҳо то 5 гузориш фиристода метавонед. Лутфан дертар кӯшиш кунед.',
+    });
+    return;
+  }
+
+  try {
+    const { subject, topicTitle, exactText, reason, comment, appVersion } = req.body || {};
+
+    if (!exactText && !reason) {
+      res.status(400).json({ error: 'Маълумоти нокифоя барои гузориши хатогӣ.' });
+      return;
+    }
+
+    // Cut each text field to a maximum of 1500 characters
+    const cleanSubject = String(subject || 'Умумӣ').slice(0, 1500);
+    const cleanTopic = String(topicTitle || 'Бе сарлавҳа').slice(0, 1500);
+    const cleanExactText = String(exactText || '').slice(0, 1500);
+    const cleanReason = String(reason || 'Дигар').slice(0, 1500);
+    const cleanComment = comment ? String(comment).slice(0, 1500) : '';
+    const cleanVersion = String(appVersion || '1.0').slice(0, 50);
+
+    const botToken = process.env.TELEGRAM_BOT_TOKEN;
+    const chatId = process.env.TELEGRAM_CHAT_ID;
+
+    if (botToken && chatId) {
+      const nowStr = new Date().toLocaleString('tg-TJ', {
+        timeZone: 'Asia/Dushanbe',
+        dateStyle: 'medium',
+        timeStyle: 'short',
+      });
+
+      const escapeHtml = (str: string) =>
+        str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+      // Format message clearly: date, subject, topic, reason, user comment, and the reported text
+      // Do not collect any personal data (no names, no IP addresses in the message)
+      const tgMessage =
+        `📢 <b>Гузориши хатогӣ (Илмисино v${cleanVersion})</b>\n\n` +
+        `📅 <b>Сана:</b> ${nowStr}\n` +
+        `📚 <b>Фан:</b> ${escapeHtml(cleanSubject)}\n` +
+        `📖 <b>Мавзӯъ:</b> ${escapeHtml(cleanTopic)}\n` +
+        `⚠️ <b>Сабаб:</b> ${escapeHtml(cleanReason)}\n` +
+        (cleanComment ? `💬 <b>Шарҳи хонанда:</b> ${escapeHtml(cleanComment)}\n\n` : '\n') +
+        `📝 <b>Матни хато:</b>\n<blockquote>${escapeHtml(cleanExactText)}</blockquote>`;
+
+      try {
+        const tgRes = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: tgMessage,
+            parse_mode: 'HTML',
+          }),
+        });
+
+        if (!tgRes.ok) {
+          const errBody = await tgRes.text();
+          console.warn('[Telegram Bot API] send failed:', errBody);
+        }
+      } catch (tgErr) {
+        console.warn('[Telegram Bot API] network error:', tgErr);
+      }
+    } else {
+      console.log('[Report Received - Telegram not configured in env]:', {
+        subject: cleanSubject,
+        topic: cleanTopic,
+        reason: cleanReason,
+        text: cleanExactText.slice(0, 80),
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Ташаккур! Хато ба барномасоз фиристода шуд 🙏',
+    });
+  } catch (err: any) {
+    console.error('Report endpoint error:', err);
+    res.status(500).json({ error: 'Хатогӣ ҳангоми коркарди гузориш.' });
+  }
+});
 
 // 1. OCR & Single-Call Question Solver
 app.post('/api/ocr', async (req: Request, res: Response): Promise<void> => {
@@ -254,16 +467,20 @@ app.post('/api/ocr', async (req: Request, res: Response): Promise<void> => {
     const { images, topicName, subject, option, userQuestion } = req.body;
     const ai = getGenAI(req);
 
-    // If user provided a topic name without images
+    // If user provided a topic name without images - fast answer immediately from model knowledge
     if ((!images || images.length === 0) && topicName) {
-      const prompt = `Дар бораи мавзӯи "${topicName}" аз фанни "${subject || 'Фанни мактабӣ'}" (${option || 'Синфи 9-11'}) матни таълимии дақиқ, мураттаб ва мукаммал мувофиқи барномаи мактабии Тоҷикистон таҳия намоед. 
-Мавзӯъро бо сарлавҳа, фаслҳо, таърифҳо, формулаҳо (агар химия/физика бошад) ё қоидаҳо (агар забони тоҷикӣ бошад) ва ҷадвалҳои муҳим пешниҳод кунед.
-${userQuestion ? `\nИловатан ба ин саволи хонанда посухи пурра диҳед: "${userQuestion}"` : ''}
+      const prompt = `Дар бораи мавзӯи "${topicName}" аз фанни "${subject || 'Фанни мактабӣ'}" (${option || 'Синфи 9-11'}) аз дониши худ шарҳи кӯтоҳ ва фаврии муқаддимавӣ таҳия намоед.
+Шарҳ бояд кӯтоҳ, ҷолиб ва фаҳмо бошад (ҳадди аксар 200-250 калима):
+1. Мафҳуми асосии мавзӯъ ва таъриф
+2. Формула, қонун ё қоидаи калидӣ (бо мисоли содда аз рӯзгори тоҷикон)
+3. Чаро ин мавзӯъ дар имтиҳони ММТ муҳим аст
+${userQuestion ? `\nИловатан ба ин саволи хонанда посухи кӯтоҳ ва мушаххас диҳед: "${userQuestion}"` : ''}
 
 Натиҷаро дар шакли JSON баргардонед:
 {
-  "title": "Номи пурраи мавзӯъ",
-  "text": "Матни мураттаби дарс бо забони тоҷикӣ бо сарлавҳаҳо ва формулаҳо"
+  "title": "Номи дақиқи мавзӯъ",
+  "text": "Матни шарҳи кӯтоҳи фаврӣ бо сарлавҳаҳо ва мисол бо забони тоҷикӣ",
+  "isTypedTopic": true
 }`;
 
       const { text, modelUsed } = await generateWithFallbackAndRetry(ai, prompt, {
@@ -273,6 +490,7 @@ ${userQuestion ? `\nИловатан ба ин саволи хонанда по�
           properties: {
             title: { type: Type.STRING },
             text: { type: Type.STRING },
+            isTypedTopic: { type: Type.BOOLEAN },
           },
           required: ['title', 'text'],
         },
@@ -283,6 +501,7 @@ ${userQuestion ? `\nИловатан ба ин саволи хонанда по�
       res.json({
         title: parsed.title || topicName,
         text: parsed.text || '',
+        isTypedTopic: true,
       });
       return;
     }
@@ -366,7 +585,7 @@ Return JSON strictly:
   }
 });
 
-// 2. Explain the Topic Simply
+// 2. Explain the Topic Simply (Max 400 words)
 app.post('/api/explain', async (req: Request, res: Response): Promise<void> => {
   try {
     const { title, text, subject, mode = 'default' } = req.body;
@@ -398,6 +617,7 @@ ${text}
 ${modePrompt}
 
 Талабот:
+- Ҳаҷми шарҳ: ҳадди аксар то 400 калима (maximum 400 words). Маводро мухтасар, равшан ва бидуни сатрҳои зиёдатӣ баён намоед.
 - Ҳамаи посух бояд бо забони равону зебои тоҷикӣ (кириллӣ) бошад. Ҳаргиз калимаҳои русиро дар ҷое, ки муодили тоҷикӣ доранд истифода набаред.
 - Бахшҳоро бо сарлавҳаҳои равшан, нуктаҳои муҳим ва мисолҳои хотирмон ҷудо кунед.
 - Истилоҳотро бо сатрҳои алоҳида нишон диҳед.`;
@@ -420,7 +640,88 @@ ${modePrompt}
   }
 });
 
-// 2.1 Live Stream of Explanation or Chat via SSE
+// 2.1 Live Stream of Explanation via SSE (First words in 1-3s)
+app.post('/api/explain-stream', async (req: Request, res: Response): Promise<void> => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  try {
+    const { title, text, subject, mode = 'default' } = req.body;
+    const ai = getGenAI(req);
+
+    let modePrompt = '';
+    if (mode === 'simpler') {
+      modePrompt = 'Илтимос, ин мавзӯъро боз ҳам содатар ва равонтар фаҳмонед, гӯё барои як кӯдаки 12-сола ё оғозкунанда, бо калимаҳои ниҳоят осон ва бо мисолҳои соддатарини рӯзгор.';
+    } else if (mode === 'another_example') {
+      modePrompt = 'Барои ин мавзӯъ боз як мисоли дигари нав, хеле ҷолиб ва равшан аз ҳаёти ҳаррӯзаи мардуми Тоҷикистон (масалан, дар ошхона, чойхона, деҳа, пахтазор, об, нон, ё табиат) пешниҳод кунед ва онро қадам ба қадам шарҳ диҳед.';
+    } else if (mode === 'more_detailed') {
+      modePrompt = 'Мавзӯъро муфассалтар бо далелҳо, нозукиҳо ва нуктаҳои санҷишии ММТ шарҳ диҳед, то ки донишҷӯ ҳама гуна саволи душворро ҳал карда тавонад.';
+    } else {
+      modePrompt = `Explain the topic very simply, as to a 14-year-old student, in short steps, with everyday examples from Tajik life.
+- Highlight key terms and definitions clearly.
+- Maximum 400 words.`;
+    }
+
+    const prompt = `Фан: ${subject}
+Мавзӯъ: ${title}
+
+Матни асосии дарс:
+${text}
+
+Вазифа:
+${modePrompt}
+
+Талабот:
+- Ҳаҷми шарҳ: ҳадди аксар то 400 калима (maximum 400 words). Мухтасар ва дақиқ.
+- Ҳамаи посух бо забони тозаи тоҷикӣ (кириллӣ) бошад.`;
+
+    let streamed = false;
+    for (const model of FALLBACK_MODELS) {
+      try {
+        const stream = await withTimeout(
+          ai.models.generateContentStream({
+            model,
+            contents: prompt,
+            config: {
+              systemInstruction: SYSTEM_INSTRUCTION,
+              temperature: 0.3,
+            },
+          }),
+          TIMEOUT_MS
+        );
+
+        for await (const chunk of stream) {
+          if (chunk.text) {
+            res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
+          }
+        }
+
+        res.write(`data: [DONE]\n\n`);
+        res.end();
+        streamed = true;
+        console.log(`[Gemini Stream OK] Model: ${model} streamed successfully`);
+        break;
+      } catch (streamErr: any) {
+        console.warn(`[Gemini Stream FAIL] Model ${model} stream error:`, streamErr?.message || streamErr);
+      }
+    }
+
+    if (!streamed) {
+      res.write(`data: ${JSON.stringify({ error: 'Серверҳо ҳоло банданд. Лутфан 1-2 дақиқа интизор шавед.' })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    }
+  } catch (err: any) {
+    console.error('Explain stream error:', err);
+    res.write(`data: ${JSON.stringify({ error: formatTajikErrorMessage(err) })}\n\n`);
+    res.write('data: [DONE]\n\n');
+    res.end();
+  }
+});
+
+// 2.2 Generic SSE Stream
 app.post('/api/stream', async (req: Request, res: Response): Promise<void> => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -430,14 +731,17 @@ app.post('/api/stream', async (req: Request, res: Response): Promise<void> => {
     const { prompt, systemInstruction } = req.body;
     const ai = getGenAI(req);
 
-    const stream = await ai.models.generateContentStream({
-      model: lastWorkingModel || 'gemini-3.8-flash',
-      contents: prompt,
-      config: {
-        systemInstruction: systemInstruction || SYSTEM_INSTRUCTION,
-        temperature: 0.3,
-      },
-    });
+    const stream = await withTimeout(
+      ai.models.generateContentStream({
+        model: lastWorkingModel || FALLBACK_MODELS[0],
+        contents: prompt,
+        config: {
+          systemInstruction: systemInstruction || SYSTEM_INSTRUCTION,
+          temperature: 0.3,
+        },
+      }),
+      TIMEOUT_MS
+    );
 
     for await (const chunk of stream) {
       if (chunk.text) {
@@ -455,7 +759,7 @@ app.post('/api/stream', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-// 3. Notebook Summary (Conspectus)
+// 3. Notebook Summary (Conspectus - Max 200 words)
 app.post('/api/summary', async (req: Request, res: Response): Promise<void> => {
   try {
     const { title, text, subject } = req.body;
@@ -470,12 +774,13 @@ ${text}
 Вазифа:
 Барои дафтари конспекти хонанда хулосаи кӯтоҳ ва мухтасар таҳия кунед (Short notebook summary):
 1. Сарлавҳаи дақиқи мавзӯъ
-2. Нуктаҳои асосӣ (ҳадди аксар 10 нуктаи кӯтоҳ ва рақамгузоришуда)
+2. Нуктаҳои асосӣ (ҳадди аксар 6-8 нуктаи кӯтоҳ ва рақамгузоришуда)
 3. Таърифҳои муҳимтарин
 4. Формулаҳо ва қоидаҳои калидӣ
 5. Як ҷадвали мухтасар ё схемаи муқоисавӣ (бо формати ҷадвали Markdown)
 
 Талабот:
+- Ҳаҷми конспект: ҳадди аксар то 200 калима (maximum 200 words). Танҳо муҳимтарин нуктаҳо барои хондану дар хотир гирифтан.
 - Ҳама чиз бо забони тоҷикӣ (кириллӣ) бошад.
 - Матн бояд тоза, мураттаб ва барои нусхабардорӣ ва чоп кардан қулай бошад.`;
 
@@ -514,7 +819,7 @@ ${text}
 Маҳз 10 саволи тестии чорҷавоба (A, B, C, D) бо сабки Маркази Миллии Тестӣ (ММТ)-и Тоҷикистон ТАНҲО бар асоси ин мавзӯъ таҳия намоед.
 - Ҳар як савол маҳз як ҷавоби дуруст ва се ҷавоби боварибахши нодуруст дорад.
 - Саволҳоро аз рӯи дараҷаи душворӣ омехта кунед: сабук, миёна ва душвор (дар сатҳи ММТ).
-- Барои ҳар савол шарҳи кӯтоҳи возеҳ нависед, ки чаро ин ҷавоб дуруст аст.
+- Барои ҳар як савол шарҳи кӯтоҳи возеҳ (1-2 ҷумла) нависед, ки чаро ин ҷавоб дуруст аст.
 - Ҳама саволҳо ва ҷавобҳо ба забони тоҷикӣ (кириллӣ) бошанд.
 
 Натиҷаро БЕ ягон матни иловагӣ танҳо бо формати JSON баргардонед:
@@ -649,7 +954,7 @@ ${(messages || []).map((m: any) => `${m.role === 'user' ? 'Донишҷӯ' : 'И
   }
 });
 
-// 6. Flashcards Generator (10-15 cards with image prompts)
+// 6. Flashcards Generator (12 high-quality cards with one idea each, hint, example, and image prompt)
 app.post('/api/flashcards', async (req: Request, res: Response): Promise<void> => {
   try {
     const { title, text, subject } = req.body;
@@ -658,54 +963,81 @@ app.post('/api/flashcards', async (req: Request, res: Response): Promise<void> =
     const prompt = `Фан: ${subject}
 Мавзӯъ: ${title}
 
-Матни дарс:
+Матни асосии дарс:
 ${text}
 
-Вазифа:
-Аз ин мавзӯъ барои такрори хонанда 10 то 15 карточкаи омӯзишӣ (Flashcards) бо формати дақиқи JSON таҳия намоед.
-Ҳар як карточка бояд инҳоро дар бар гирад:
-1. "term": Истилоҳ ё мафҳуми калидӣ бо забони тоҷикӣ
-2. "question": Саволи возеҳ ва кӯтоҳ дар бораи ин истилоҳ ё қоида
-3. "answer": Ҷавоби дақиқ ва кӯтоҳ
-4. "imagePrompt": Тавсифи расм ба забони англисӣ барои тавлиди тасвир (масалан: "A clean flat vector educational diagram of a plant cell with chloroplast on pure white background, no text")
-5. "hint": Маслиҳат ё роҳнамоии кӯтоҳ барои ба ёд овардан
+Вазифаи дақиқ:
+Аз маводи ин мавзӯъ маҳз 12 карточкаи омӯзишии баландсифат (Flashcards) бо формати JSON таҳия намоед.
+
+ҚОИДАҲОИ ҲАТМӢ БАРОИ СИФАТИ КАРТОЧКАҲО:
+1. Ҳар як карточка ТАНҲО ЯК ИДЕЯ ё МАФҲУМРО месанҷад (One card = One concept).
+2. Савол ("question"): Бояд кӯтоҳ, равшан ва мушаххас бошад (масалан: "Вазифаи митохондрияҳо чист?", "Формулаи қонуни дуюми Нютон кадом аст?").
+3. Ҷавоб ("answer"): Аз 1-2 ҷумлаи сода ва дақиқ иборат бошад.
+4. Маслиҳат ("hint"): Маслиҳати кӯтоҳ ё калимаи ёридиҳанда барои ба ёд овардан.
+5. Мисол ("example"): Як мисоли ҷолиб аз ҳаёти ҳаррӯза ё табиат (everyday example in Tajik life).
+6. "imagePrompt": Тавсифи расм ба забони англисӣ барои тавлиди тасвири векторӣ (flat educational vector scientific illustration, pure white background, centered, no text, no letters, no copyrighted characters).
+7. ТАНҲО аз маълумоти матни мавзӯъ истифода баред. Карточкаҳои такрорӣ ё якхела насозед.
+8. Забони тоҷикӣ: Забони тозаи адабии мактабӣ (кириллӣ). Ҳаргиз калимаҳои русиро дар ҷое, ки муодили тоҷикӣ доранд, истифода набаред.
 
 Натиҷаро ТАНҲО бо формати JSON баргардонед:
 [
   {
-    "term": "...",
-    "question": "...",
-    "answer": "...",
-    "imagePrompt": "...",
-    "hint": "..."
+    "term": "Истилоҳ",
+    "question": "Саволи кӯтоҳ",
+    "answer": "Ҷавоби дақиқ",
+    "hint": "Маслиҳат",
+    "example": "Мисоли рӯзгор",
+    "imagePrompt": "English prompt for image generation"
   }
 ]`;
 
-    const { text: cardsJson, modelUsed } = await generateWithFallbackAndRetry(
-      ai,
-      prompt,
-      {
-        temperature: 0.3,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              term: { type: Type.STRING },
-              question: { type: Type.STRING },
-              answer: { type: Type.STRING },
-              imagePrompt: { type: Type.STRING },
-              hint: { type: Type.STRING },
-            },
-            required: ['term', 'question', 'answer', 'imagePrompt', 'hint'],
-          },
-        },
-      }
-    );
+    let cards: any[] = [];
+    let attempts = 0;
+    let modelUsedFinal = 'gemini-3.8-flash';
 
-    const cards = JSON.parse(cardsJson || '[]');
-    res.setHeader('x-model-used', modelUsed);
+    while (attempts < 2) {
+      attempts++;
+      try {
+        const { text: cardsJson, modelUsed } = await generateWithFallbackAndRetry(
+          ai,
+          prompt,
+          {
+            temperature: 0.3,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  term: { type: Type.STRING },
+                  question: { type: Type.STRING },
+                  answer: { type: Type.STRING },
+                  hint: { type: Type.STRING },
+                  example: { type: Type.STRING },
+                  imagePrompt: { type: Type.STRING },
+                },
+                required: ['term', 'question', 'answer', 'hint', 'example', 'imagePrompt'],
+              },
+            },
+          }
+        );
+
+        modelUsedFinal = modelUsed;
+        const parsed = JSON.parse(cardsJson || '[]');
+        if (Array.isArray(parsed) && parsed.length >= 8) {
+          cards = parsed;
+          break;
+        }
+      } catch (parseErr) {
+        console.warn(`Flashcards generation parse attempt ${attempts} failed, retrying...`);
+      }
+    }
+
+    if (!Array.isArray(cards) || cards.length === 0) {
+      throw new Error('Таҳияи карточкаҳо бемуваффақият шуд. Лутфан тугмаи «Дубора кӯшиш кунед»-ро пахш намоед.');
+    }
+
+    res.setHeader('x-model-used', modelUsedFinal);
     res.json({ cards });
   } catch (error: any) {
     console.error('Flashcards API Error:', error);
@@ -714,16 +1046,19 @@ ${text}
 });
 
 // 7. Flashcard Image Generator
-app.post('/api/generate-card-image', async (req: Request, res: Response): Promise<void> => {
+const handleImageGeneration = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { imagePrompt, term } = req.body;
+    const { imagePrompt, term, subject } = req.body;
     const ai = getGenAI(req);
+
+    const cleanSubject = subject ? String(subject) : '';
+    const cleanPrompt = `${imagePrompt || term}. Simple clean colorful flat educational vector scientific illustration for ${cleanSubject}, pure solid white background, centered, no text, no letters, no words, no numbers, no watermark, no human faces with copyrighted characters, minimalist school textbook diagram style.`;
 
     // Attempt image generation if available
     try {
       const response = await ai.models.generateImages({
         model: 'imagen-3.0-generate-002',
-        prompt: `${imagePrompt || term}, clean flat educational scientific illustration, white background, minimalist, high quality, no text`,
+        prompt: cleanPrompt,
         config: {
           numberOfImages: 1,
           aspectRatio: '1:1',
@@ -738,14 +1073,17 @@ app.post('/api/generate-card-image', async (req: Request, res: Response): Promis
         return;
       }
     } catch (imgErr) {
-      // Graceful fallback to rich graphic placeholder
+      console.warn('generateImages failed, falling back:', imgErr);
     }
 
     res.json({ imageUrl: null });
   } catch (error: any) {
     res.json({ imageUrl: null });
   }
-});
+};
+
+app.post('/api/generate-card-image', handleImageGeneration);
+app.post('/api/card-image', handleImageGeneration);
 
 // 8. Full MMT Exam Question Batch
 app.post('/api/exam-batch', async (req: Request, res: Response): Promise<void> => {
@@ -1004,4 +1342,6 @@ async function startServer() {
   });
 }
 
-startServer();
+if (process.env.NODE_ENV !== 'test') {
+  startServer();
+}

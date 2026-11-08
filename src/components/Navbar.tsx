@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { GraduationCap, Flame, Moon, Sun, Cpu } from 'lucide-react';
 import { AppSettings } from '../types/index.ts';
-import { requestSystemStatus } from '../services/api.ts';
+import { requestSystemStatus, subscribeNetworkStatus, AppNetworkStatus } from '../services/api.ts';
 
 interface NavbarProps {
   streakDays: number;
@@ -17,24 +17,34 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenSettings,
 }) => {
   const [activeModel, setActiveModel] = useState<string>('gemini-3.8-flash');
-  const [isOnline, setIsOnline] = useState<boolean>(true);
+  const [netStatus, setNetStatus] = useState<AppNetworkStatus>('green');
+  const [statusMessage, setStatusMessage] = useState<string>('Пайвастшавӣ муқаррарӣ аст');
 
   useEffect(() => {
     // Check system status on mount
     requestSystemStatus()
       .then((data) => {
         if (data.activeModel) setActiveModel(data.activeModel);
-        setIsOnline(data.status === 'ok');
       })
-      .catch(() => setIsOnline(false));
+      .catch(() => {});
 
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
+    // Subscribe to real-time network and server status
+    const unsubscribe = subscribeNetworkStatus((status, message) => {
+      setNetStatus(status);
+      if (message) setStatusMessage(message);
+    });
+
+    const handleOnline = () => setNetStatus('green');
+    const handleOffline = () => {
+      setNetStatus('red');
+      setStatusMessage('Интернет нест');
+    };
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
 
     return () => {
+      unsubscribe();
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
@@ -75,15 +85,19 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Right side widgets */}
         <div className="flex items-center gap-2 sm:gap-3">
-          {/* Active Model & Health Status Badge */}
+          {/* Active Model & Health Status Badge with 3-state dot */}
           <button
             onClick={onOpenSettings}
-            title={`Модели фаъол: ${activeModel}. Барои санҷиш пахш кунед.`}
+            title={`Ҳолат: ${statusMessage}. Модел: ${activeModel}. Барои санҷиш пахш кунед.`}
             className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-[11px] font-medium hover:border-emerald-400 transition-colors"
           >
             <span
               className={`w-2 h-2 rounded-full ${
-                isOnline ? 'bg-emerald-500 shadow-xs shadow-emerald-500/50 animate-pulse' : 'bg-rose-500'
+                netStatus === 'green'
+                  ? 'bg-emerald-500 shadow-xs shadow-emerald-500/50 animate-pulse'
+                  : netStatus === 'yellow'
+                  ? 'bg-amber-500 shadow-xs shadow-amber-500/50 animate-ping'
+                  : 'bg-rose-500'
               }`}
             />
             <Cpu className="w-3 h-3 hidden sm:inline text-slate-500" />

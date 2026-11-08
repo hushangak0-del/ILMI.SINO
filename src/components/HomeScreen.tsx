@@ -1,7 +1,8 @@
-import React from 'react';
-import { FlaskConical, Dna, Atom, BookOpen, Camera, Sparkles, ArrowRight, Clock, Award, Calculator } from 'lucide-react';
+import { FlaskConical, Dna, Atom, BookOpen, Camera, Sparkles, ArrowRight, Clock, Award, Calculator, Share2 } from 'lucide-react';
 import { SubjectConfig, SubjectId, TopicRecord } from '../types/index.ts';
 import { SUBJECTS } from '../utils/studyLogic.ts';
+import { PwaInstallBanner } from './PwaInstallBanner.tsx';
+import { inviteFriends } from '../utils/shareUtils.ts';
 
 interface HomeScreenProps {
   onSelectSubject: (subjectId: SubjectId, option: string) => void;
@@ -9,6 +10,8 @@ interface HomeScreenProps {
   onOpenProblemSolver: () => void;
   recentTopics: TopicRecord[];
   onOpenTopic: (topic: TopicRecord) => void;
+  dueCardsCount?: number;
+  onOpenCards?: () => void;
 }
 
 export const HomeScreen: React.FC<HomeScreenProps> = ({
@@ -17,6 +20,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   onOpenProblemSolver,
   recentTopics,
   onOpenTopic,
+  dueCardsCount = 0,
+  onOpenCards,
 }) => {
   const getSubjectIcon = (id: SubjectId) => {
     switch (id) {
@@ -97,17 +102,71 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               <Calculator className="w-4 h-4 stroke-[2.5] text-sky-300" />
               <span>🧮 Масъала ҳал кун</span>
             </button>
+
+            <button
+              onClick={() => inviteFriends()}
+              className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-white/10 hover:bg-white/20 border border-white/15 text-slate-200 hover:text-white font-bold text-xs sm:text-sm backdrop-blur-md transition-transform active:scale-95"
+            >
+              <Share2 className="w-4 h-4 text-emerald-300" />
+              <span>Дӯстонро даъват кун</span>
+            </button>
           </div>
         </div>
       </section>
 
+      {/* Daily Flashcards Due Widget (Такрори имрӯз) */}
+      <div
+        onClick={onOpenCards}
+        className="cursor-pointer p-4 sm:p-5 rounded-3xl bg-gradient-to-r from-purple-900/90 via-indigo-900/80 to-slate-900 border border-purple-500/30 text-white shadow-lg flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3.5 transition-all hover:border-purple-400/50 hover:shadow-purple-500/10 active:scale-[0.99]"
+      >
+        <div className="flex items-center gap-3.5">
+          <div className="w-12 h-12 rounded-2xl bg-purple-500/20 border border-purple-400/30 flex items-center justify-center text-2xl shrink-0 shadow-inner">
+            🃏
+          </div>
+          <div className="space-y-0.5">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-extrabold text-sm sm:text-base text-white">
+                Такрори имрӯз (Карточкаҳо)
+              </span>
+              <span className={`px-2.5 py-0.5 rounded-full text-xs font-black shadow-xs ${
+                dueCardsCount > 0 ? 'bg-amber-500 text-slate-950 animate-pulse' : 'bg-emerald-500/30 text-emerald-300 border border-emerald-500/40'
+              }`}>
+                {dueCardsCount > 0 ? `${dueCardsCount} корт омода` : 'Ҳамааш такрор шуд ✅'}
+              </span>
+            </div>
+            <p className="text-xs text-purple-200/80">
+              {dueCardsCount > 0
+                ? `${dueCardsCount} карточка мувофиқи қоидаи такрори фосилавӣ барои имрӯз ба нақша гирифта шудааст`
+                : 'Барои имрӯз дигар корти ба таъхир афтода нест. Шумо метавонед озод такрор кунед!'}
+            </p>
+          </div>
+        </div>
+
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            if (onOpenCards) onOpenCards();
+          }}
+          className="w-full sm:w-auto px-4 py-2.5 rounded-2xl bg-white text-indigo-950 hover:bg-purple-50 font-black text-xs transition-all shrink-0 flex items-center justify-center gap-1.5 shadow-md active:scale-95"
+        >
+          <span>{dueCardsCount > 0 ? 'Оғози такрор' : 'Дидани карточкаҳо'}</span>
+          <ArrowRight className="w-3.5 h-3.5" />
+        </button>
+      </div>
+
       {/* Main Subjects Section */}
       <section className="space-y-4">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div>
-            <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-              Интихоби фан
-            </h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-lg font-bold text-slate-900 dark:text-white">
+                Интихоби фан
+              </h2>
+              {/* Pointer Hint: "Аз ин ҷо оғоз кунед 👇" */}
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-100 dark:bg-emerald-950/80 border border-emerald-300 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 font-extrabold text-[11px] animate-bounce shadow-xs">
+                <span>Аз ин ҷо оғоз кунед 👇</span>
+              </span>
+            </div>
             <p className="text-xs text-slate-500 dark:text-slate-400">
               Фан ва синф ё фасли дилхоҳро интихоб кунед
             </p>
@@ -223,6 +282,11 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           </div>
         </section>
       )}
+
+      {/* PWA Phone Install Banner */}
+      <section className="pt-2">
+        <PwaInstallBanner />
+      </section>
     </div>
   );
 };

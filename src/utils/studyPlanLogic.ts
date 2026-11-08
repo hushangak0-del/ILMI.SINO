@@ -3,9 +3,11 @@ import { StudyPlan, StudyPlanDay } from '../types/features.ts';
 export function calculateDaysRemaining(targetDateStr: string): number {
   if (!targetDateStr) return 0;
   const target = new Date(targetDateStr).getTime();
+  if (isNaN(target)) return 0;
   const now = new Date().setHours(0, 0, 0, 0);
   const diff = target - now;
-  return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
+  const days = Math.ceil(diff / (1000 * 60 * 60 * 24));
+  return Number.isFinite(days) ? Math.max(0, days) : 0;
 }
 
 export function generateInitialSchedule(

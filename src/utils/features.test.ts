@@ -39,6 +39,25 @@ test('Spaced repetition intervals update correctly on student feedback', () => {
   const afterGood2 = calculateNextReview(afterGood1, 'good');
   assert.equal(afterGood2.intervalDays, 7);
   assert.equal(afterGood2.repetitions, 2);
+
+  // 'good' third time -> >= 14 days interval
+  const afterGood3 = calculateNextReview(afterGood2, 'good');
+  assert.ok(afterGood3.intervalDays >= 14);
+  assert.equal(afterGood3.status, 'mastered');
+
+  // Edge case: malformed card with undefined/NaN repetitions or intervalDays
+  const malformedCard = {
+    ...card,
+    repetitions: undefined as any,
+    intervalDays: undefined as any,
+    nextReviewDate: undefined as any,
+  };
+  assert.doesNotThrow(() => {
+    const safeResult = calculateNextReview(malformedCard, 'good');
+    assert.ok(safeResult.nextReviewDate);
+    assert.equal(typeof safeResult.nextReviewDate, 'string');
+    assert.match(safeResult.nextReviewDate, /^\d{4}-\d{2}-\d{2}$/);
+  });
 });
 
 test('calculateMolarMass correctly parses and computes masses for chemical formulas', () => {
@@ -126,4 +145,76 @@ test('calculateResizeDimensions scales down images exceeding maxDimension', asyn
   const res = await compressImageClient('data:image/jpeg;base64,mock', 1280, 0.8);
   assert.ok(res.dataUrl);
 });
+
+test('generateCardQuizOptions generates 4 options with exactly one correct option', async () => {
+  const { generateCardQuizOptions } = await import('./flashcardsLogic.ts');
+
+  const card1: Flashcard = {
+    id: 'c1',
+    subjectId: 'chemistry',
+    term: 'Атом',
+    question: 'Атом чист?',
+    answer: 'Хурдтарин зарраи тақсимнашавандаи химиявӣ',
+    imagePrompt: 'Atom drawing',
+    hint: 'Зарра',
+    example: 'Мисоли атом',
+    repetitions: 0,
+    intervalDays: 0,
+    nextReviewDate: '2026-01-01',
+    status: 'new',
+  };
+
+  const card2: Flashcard = {
+    ...card1,
+    id: 'c2',
+    term: 'Молекула',
+    question: 'Молекула чист?',
+    answer: 'Зарраи хурдтарини модда, ки хосиятҳои асосии химиявии онро нигоҳ медорад',
+  };
+
+  const options = generateCardQuizOptions(card1, [card1, card2]);
+  assert.equal(options.length, 4);
+
+  const correctMatches = options.filter((o) => o.isCorrect);
+  assert.equal(correctMatches.length, 1);
+  assert.equal(correctMatches[0].text, card1.answer);
+});
+
+test('detectErrorType categorizes errors accurately for friendly cards', async () => {
+  const { detectErrorType } = await import('../components/FriendlyErrorCard.tsx');
+
+  assert.equal(detectErrorType('Серверҳо ҳоло банданд (503)'), 'server_busy');
+  assert.equal(detectErrorType('Сервер банд аст'), 'server_busy');
+  assert.equal(detectErrorType('Лимити имрӯза тамом шуд (429)'), 'quota_limit');
+  assert.equal(detectErrorType('Resource exhausted quota limit reached'), 'quota_limit');
+  assert.equal(detectErrorType('Интернет нест ё қатъ шуд'), 'network');
+  assert.equal(detectErrorType('Custom unexpected error'), 'general');
+});
+
+test('Speech utils function correctly in non-browser environment', async () => {
+  const { isSpeechRecognitionSupported, stopSpeech } = await import('./speechUtils.ts');
+
+  // Should safely return false in Node test runner without crashing
+  assert.equal(typeof isSpeechRecognitionSupported(), 'boolean');
+  assert.doesNotThrow(() => {
+    stopSpeech();
+  });
+});
+
+test('FALLBACK_MODELS specifies fast flash models list in correct order', async () => {
+  const { FALLBACK_MODELS } = await import('../../server.ts');
+  assert.ok(Array.isArray(FALLBACK_MODELS));
+  assert.equal(FALLBACK_MODELS.length, 3);
+  assert.equal(FALLBACK_MODELS[0], 'gemini-3.8-flash');
+  assert.equal(FALLBACK_MODELS[1], 'gemini-3.1-flash-lite');
+  assert.equal(FALLBACK_MODELS[2], 'gemini-flash-latest');
+});
+
+test('calculateResizeDimensions correctly resizes to max 1024px', async () => {
+  const { calculateResizeDimensions } = await import('./imageCompressor.ts');
+  const dims = calculateResizeDimensions(3000, 1500, 1024);
+  assert.equal(dims.width, 1024);
+  assert.equal(dims.height, 512);
+});
+
 

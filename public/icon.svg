@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4338ca"/>
+      <stop offset="50%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+    <linearGradient id="bulbGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fef08a"/>
+      <stop offset="50%" stop-color="#fbbf24"/>
+      <stop offset="100%" stop-color="#f59e0b"/>
+    </linearGradient>
+    <linearGradient id="bookPageL" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#e0e7ff"/>
+      <stop offset="100%" stop-color="#ffffff"/>
+    </linearGradient>
+    <linearGradient id="bookPageR" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#e0e7ff"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#0f172a" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <!-- Background rounded squircle with safe zone -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)"/>
+
+  <!-- Subtle glow circle in the center -->
+  <circle cx="256" cy="240" r="150" fill="#ffffff" opacity="0.12"/>
+
+  <!-- Lightbulb (Wisdom / Ideas) on top of the book -->
+  <g filter="url(#shadow)">
+    <!-- Lightbulb Rays -->
+    <path d="M256 70 L256 95 M190 95 L205 115 M322 95 L307 115 M150 155 L175 165 M362 155 L337 165" stroke="#fef08a" stroke-width="8" stroke-linecap="round"/>
+
+    <!-- Lightbulb Body -->
+    <path d="M256 110 C216 110 184 142 184 182 C184 208 198 230 220 244 L220 262 C220 266 224 270 228 270 L284 270 C288 270 292 266 292 262 L292 244 C314 230 328 208 328 182 C328 142 296 110 256 110 Z" fill="url(#bulbGrad)"/>
+    <!-- Lightbulb Base / Filament -->
+    <path d="M228 274 L284 274 M234 282 L278 282 M242 290 L270 290" stroke="#f1f5f9" stroke-width="4" stroke-linecap="round"/>
+    <!-- Filament highlight -->
+    <path d="M244 180 Q256 150 268 180" stroke="#ffffff" stroke-width="6" stroke-linecap="round" fill="none"/>
+  </g>
+
+  <!-- Open Book of Knowledge -->
+  <g filter="url(#shadow)">
+    <!-- Book Spine & Shadow base -->
+    <path d="M256 385 L256 425 Q210 405 130 415 L130 375 Q210 365 256 385 Z" fill="#312e81"/>
+    <path d="M256 385 L256 425 Q302 405 382 415 L382 375 Q302 365 256 385 Z" fill="#1e1b4b"/>
+
+    <!-- Left Book Page -->
+    <path d="M256 380 Q210 355 120 365 L120 325 Q210 315 256 340 Z" fill="url(#bookPageL)"/>
+    <!-- Left Page text lines -->
+    <line x1="145" y1="335" x2="230" y2="330" stroke="#94a3b8" stroke-width="4" stroke-linecap="round"/>
+    <line x1="145" y1="347" x2="225" y2="343" stroke="#94a3b8" stroke-width="4" stroke-linecap="round"/>
+    <line x1="145" y1="359" x2="210" y2="356" stroke="#94a3b8" stroke-width="4" stroke-linecap="round"/>
+
+    <!-- Right Book Page -->
+    <path d="M256 380 Q302 355 392 365 L392 325 Q302 315 256 340 Z" fill="url(#bookPageR)"/>
+    <!-- Right Page text lines -->
+    <line x1="282" y1="330" x2="367" y2="335" stroke="#94a3b8" stroke-width="4" stroke-linecap="round"/>
+    <line x1="287" y1="343" x2="367" y2="347" stroke="#94a3b8" stroke-width="4" stroke-linecap="round"/>
+    <line x1="302" y1="356" x2="367" y2="359" stroke="#94a3b8" stroke-width="4" stroke-linecap="round"/>
+
+    <!-- Center Book Spine Centerfold -->
+    <path d="M256 340 L256 385" stroke="#4f46e5" stroke-width="3"/>
+  </g>
+
+  <!-- Small Science Symbols floating around -->
+  <circle cx="120" cy="230" r="10" fill="#38bdf8" opacity="0.8"/>
+  <circle cx="395" cy="220" r="8" fill="#34d399" opacity="0.8"/>
+  <circle cx="370" cy="270" r="5" fill="#facc15" opacity="0.8"/>
+</svg>

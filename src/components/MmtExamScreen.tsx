@@ -15,13 +15,20 @@ import {
   Layers,
   FileText,
   Loader2,
+  Flag,
+  Send,
+  AlertTriangle,
 } from 'lucide-react';
 import { ExamQuestion, ExamResult } from '../types/features.ts';
 import { TopicRecord } from '../types/index.ts';
 import { SUBJECTS } from '../utils/studyLogic.ts';
 import { calculateExamResult, formatSecondsToTime } from '../utils/examLogic.ts';
 import { requestExamBatch } from '../services/api.ts';
-import { saveStoredExamResult } from '../services/storage.ts';
+import { saveStoredExamResult, isTextReported } from '../services/storage.ts';
+import { shareToTelegram } from '../utils/shareUtils.ts';
+import { ReportModal } from './ReportModal.tsx';
+import { AiDisclaimerNotice } from './AiDisclaimerNotice.tsx';
+import { FriendlyErrorCard } from './FriendlyErrorCard.tsx';
 
 interface MmtExamScreenProps {
   topics: TopicRecord[];
@@ -39,6 +46,7 @@ export const MmtExamScreen: React.FC<MmtExamScreenProps> = ({ topics, onExamSave
     'Забони тоҷикӣ',
   ]);
   const [timerMinutes, setTimerMinutes] = useState<number>(30);
+  const [reportingQuestion, setReportingQuestion] = useState<ExamQuestion | null>(null);
 
   // Active exam state
   const [questions, setQuestions] = useState<ExamQuestion[]>([]);
@@ -376,17 +384,29 @@ export const MmtExamScreen: React.FC<MmtExamScreenProps> = ({ topics, onExamSave
                     {q.subjectName} • Саволи #{currentIdx + 1}
                   </span>
 
-                  <button
-                    onClick={() => toggleFlag(currentIdx)}
-                    className={`px-3 py-1 rounded-xl text-xs font-bold flex items-center gap-1 transition-colors ${
-                      isFlagged
-                        ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                        : 'border border-slate-200 text-slate-500 hover:text-amber-500'
-                    }`}
-                  >
-                    <Star className={`w-3.5 h-3.5 ${isFlagged ? 'fill-amber-500 text-amber-500' : ''}`} />
-                    <span>{isFlagged ? 'Нишон шуд' : 'Нишон кун ⭐'}</span>
-                  </button>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setReportingQuestion(q)}
+                      className="px-2.5 py-1 rounded-xl text-xs font-bold flex items-center gap-1 text-slate-400 hover:text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-950/40 transition-colors"
+                      title="Хато ёфтам"
+                    >
+                      <Flag className="w-3.5 h-3.5" />
+                      <span>Хато ёфтам</span>
+                    </button>
+
+                    <button
+                      onClick={() => toggleFlag(currentIdx)}
+                      className={`px-3 py-1 rounded-xl text-xs font-bold flex items-center gap-1 transition-colors ${
+                        isFlagged
+                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                          : 'border border-slate-200 text-slate-500 hover:text-amber-500'
+                      }`}
+                    >
+                      <Star className={`w-3.5 h-3.5 ${isFlagged ? 'fill-amber-500 text-amber-500' : ''}`} />
+                      <span>{isFlagged ? 'Нишон шуд' : 'Нишон кун ⭐'}</span>
+                    </button>
+                  </div>
                 </div>
 
                 <h3 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white leading-relaxed">
@@ -511,14 +531,41 @@ export const MmtExamScreen: React.FC<MmtExamScreenProps> = ({ topics, onExamSave
               </p>
             </div>
 
-            <div className="pt-2 flex justify-center gap-3">
+            <div className="pt-2 flex flex-wrap justify-center gap-3">
               <button
                 onClick={() => setExamState('setup')}
                 className="px-5 py-2.5 rounded-2xl bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs shadow-lg shadow-emerald-500/25 transition-transform active:scale-95"
               >
                 Имтиҳони нав
               </button>
+
+              <button
+                onClick={() => {
+                  const text = `🏆 Натиҷаи расмии имтиҳони тақлидии ММТ дар «Илмисино»:\n\n` +
+                    `📊 Хол: ${examResult.correctCount}/${examResult.totalQuestions} (${examResult.percentage}%)\n` +
+                    `⏱ Вақти сарфшуда: ${formatSecondsToTime(examResult.timeSpentSeconds)}\n\n` +
+                    `Тақсимот аз рӯи фанҳо:\n` +
+                    Object.entries(examResult.subjectScores)
+                      .map(([sub, data]) => `• ${sub}: ${data.correct}/${data.total} (${data.percentage}%)`)
+                      .join('\n') +
+                    `\n\nБо «Илмисино» - ёрдамчии ҳушманди ММТ тайёр шавед!`;
+                  shareToTelegram({
+                    title: 'Натиҷаи имтиҳони тақлидии ММТ',
+                    text,
+                  });
+                }}
+                className="px-5 py-2.5 rounded-2xl bg-sky-500 hover:bg-sky-600 text-white font-bold text-xs shadow-lg shadow-sky-500/25 transition-transform active:scale-95 flex items-center gap-1.5"
+              >
+                <Send className="w-3.5 h-3.5" />
+                <span>✈️ Ба Telegram фиристодан</span>
+              </button>
             </div>
+
+            {/* AI exam result disclaimer notice */}
+            <AiDisclaimerNotice
+              variant="examResult"
+              className="border-white/10 text-slate-300 dark:text-slate-400 justify-center"
+            />
           </div>
 
           {/* Scores per subject breakdown */}
@@ -554,6 +601,7 @@ export const MmtExamScreen: React.FC<MmtExamScreenProps> = ({ topics, onExamSave
             <div className="space-y-3">
               {examResult.questions.map((q, idx) => {
                 const isCorrect = q.userAnswer === q.correct;
+                const isReported = isTextReported(q.question);
 
                 return (
                   <div
@@ -575,17 +623,40 @@ export const MmtExamScreen: React.FC<MmtExamScreenProps> = ({ topics, onExamSave
                       )}
                     </div>
 
-                    <div className="flex flex-wrap gap-2 text-[11px]">
-                      <span className="px-2 py-0.5 rounded-md bg-slate-200 dark:bg-slate-800 font-semibold">
-                        Ҷавоби шумо: {q.userAnswer ? `${q.userAnswer}) ${q.options[q.userAnswer]}` : 'Бе ҷавоб'}
-                      </span>
-                      <span className="px-2 py-0.5 rounded-md bg-emerald-200 dark:bg-emerald-900 text-emerald-900 dark:text-emerald-200 font-bold">
-                        Ҷавоби дуруст: {q.correct}) {q.options[q.correct]}
-                      </span>
+                    {isReported && (
+                      <div className="p-2 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 text-amber-800 dark:text-amber-300 text-xs flex items-center gap-1.5">
+                        <Flag className="w-3.5 h-3.5 fill-amber-500 shrink-0" />
+                        <span>Шумо дар ин савол хато қайд карда будед.</span>
+                      </div>
+                    )}
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                      <div className="flex flex-wrap gap-2">
+                        <span className="px-2 py-0.5 rounded-md bg-slate-200 dark:bg-slate-800 font-semibold">
+                          Ҷавоби шумо: {q.userAnswer ? `${q.userAnswer}) ${q.options[q.userAnswer]}` : 'Бе ҷавоб'}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-md bg-emerald-200 dark:bg-emerald-900 text-emerald-900 dark:text-emerald-200 font-bold">
+                          Ҷавоби дуруст: {q.correct}) {q.options[q.correct]}
+                        </span>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => setReportingQuestion(q)}
+                        className="px-2 py-1 rounded-xl bg-slate-100 hover:bg-amber-50 dark:bg-slate-800 dark:hover:bg-amber-950/40 text-slate-500 hover:text-amber-600 dark:text-slate-400 dark:hover:text-amber-400 font-bold text-[11px] flex items-center gap-1 transition-colors"
+                      >
+                        <Flag className="w-3 h-3 text-amber-500" />
+                        <span>Хато ёфтам</span>
+                      </button>
                     </div>
 
-                    <div className="p-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 text-slate-600 dark:text-slate-300 leading-relaxed">
-                      💡 <strong>Шарҳи Илмисино:</strong> {q.explanation}
+                    <div className="p-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 text-slate-600 dark:text-slate-300 leading-relaxed space-y-2">
+                      <div>💡 <strong>Шарҳи Илмисино:</strong> {q.explanation}</div>
+                      <AiDisclaimerNotice
+                        variant="short"
+                        speakableText={q.explanation}
+                        onReport={() => setReportingQuestion(q)}
+                      />
                     </div>
                   </div>
                 );
@@ -593,6 +664,18 @@ export const MmtExamScreen: React.FC<MmtExamScreenProps> = ({ topics, onExamSave
             </div>
           </div>
         </div>
+      )}
+
+      {/* Report Modal */}
+      {reportingQuestion && (
+        <ReportModal
+          isOpen={!!reportingQuestion}
+          onClose={() => setReportingQuestion(null)}
+          subject={reportingQuestion.subjectName}
+          topicTitle="Саволи имтиҳони ММТ"
+          exactText={`${reportingQuestion.question}\n\nВариантҳо:\nA) ${reportingQuestion.options.A}\nB) ${reportingQuestion.options.B}\nC) ${reportingQuestion.options.C}\nD) ${reportingQuestion.options.D}\n\nҶавоби дуруст: ${reportingQuestion.correct}\nШарҳ: ${reportingQuestion.explanation}`}
+          source="quiz"
+        />
       )}
     </div>
   );
